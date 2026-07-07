@@ -1,0 +1,48 @@
+# b-rs — konfigurasjon. Kopier til config.toml og tilpass.
+
+# "paper" = simulering (trygt, standard). "live" = ekte ordrer via megleren under.
+mode = "paper"
+
+# "paper" eller "ibkr" (Interactive Brokers via Client Portal Gateway).
+broker = "paper"
+
+# Sekunder mellom hver kursoppdatering. Yahoo-data er ~15 min forsinket,
+# så det er ingen grunn til å gå under ~15 s.
+poll_secs = 15
+
+# Yahoo Finance-tickere. Oslo Børs har suffiks ".OL".
+watchlist = ["EQNR.OL", "DNB.OL", "NHY.OL", "TEL.OL"]
+
+# Startkapital i papirmodus.
+starting_cash = 100000.0
+
+# SQLite-fil for ordre- og hendelseslogg.
+db_path = "b-rs.db"
+
+[strategy]
+name = "sma_cross"   # kjøp når rask SMA krysser over treg, selg ved kryss under
+fast = 5
+slow = 20
+order_qty = 10       # antall aksjer per kjøp
+
+[risk]
+max_order_value = 10000.0     # maks verdi per enkeltordre
+max_position_value = 25000.0  # maks posisjonsverdi per symbol
+max_orders_per_min = 4        # ratebegrensning
+max_daily_loss = 5000.0       # stopp all handel ved dette tapet
+
+# Interactive Brokers — kreves bare når broker = "ibkr" og mode = "live".
+# Forutsetter at Client Portal Gateway kjører lokalt og at du har logget inn
+# på https://localhost:5000 i nettleseren.
+# [ibkr]
+# base_url = "https://localhost:5000/v1/api"
+# account = "U1234567"
+# accept_invalid_certs = true   # gatewayen bruker selvsignert sertifikat
+
+[nordnet]
+# Lesemodus via UOFFISIELT API — henter kun portefølje, handler aldri.
+# Kan bryte Nordnets vilkår og slutte å virke uten varsel; brukes på eget ansvar.
+# Legitimasjon settes i miljøet: NORDNET_USERNAME og NORDNET_PASSWORD.
+# Fungerer ikke hvis kontoen krever BankID-innlogging.
+enabled = false
+poll_secs = 300

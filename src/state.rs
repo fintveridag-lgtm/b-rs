@@ -1,0 +1,74 @@
+use crate::types::{ExternalPosition, Order, Position, Quote};
+use chrono::{DateTime, Utc};
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// Flagg delt mellom UI (skriver) og engine (leser).
+#[derive(Default)]
+pub struct Flags {
+    pub quit: AtomicBool,
+    /// Kill switch: stopp all handel og kanseller åpne ordrer.
+    pub killed: AtomicBool,
+    /// Pause: strategien evalueres ikke, men kurser oppdateres fortsatt.
+    pub paused: AtomicBool,
+}
+
+impl Flags {
+    pub fn quit(&self) -> bool {
+        self.quit.load(Ordering::Relaxed)
+    }
+    pub fn killed(&self) -> bool {
+        self.killed.load(Ordering::Relaxed)
+    }
+    pub fn paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+}
+
+/// Alt UI-et trenger for å tegne skjermen. Engine skriver, UI leser.
+pub struct UiState {
+    pub mode: String,
+    pub broker_name: String,
+    pub cash: f64,
+    pub equity: f64,
+    pub drawdown: f64,
+    pub quotes: BTreeMap<String, Quote>,
+    pub positions: Vec<Position>,
+    pub nordnet_positions: Vec<ExternalPosition>,
+    pub nordnet_enabled: bool,
+    pub orders: VecDeque<Order>,
+    pub logs: VecDeque<(DateTime<Utc>, String)>,
+    pub last_tick: Option<DateTime<Utc>>,
+}
+
+impl UiState {
+    pub fn new(mode: &str, broker_name: &str, nordnet_enabled: bool) -> Self {
+        Self {
+            mode: mode.to_string(),
+            broker_name: broker_name.to_string(),
+            cash: 0.0,
+            equity: 0.0,
+            drawdown: 0.0,
+            quotes: BTreeMap::new(),
+            positions: Vec::new(),
+            nordnet_positions: Vec::new(),
+            nordnet_enabled,
+            orders: VecDeque::new(),
+            logs: VecDeque::new(),
+            last_tick: None,
+        }
+    }
+
+    pub fn log(&mut self, msg: impl Into<String>) {
+        self.logs.push_front((Utc::now(), msg.into()));
+        self.logs.truncate(200);
+    }
+
+    pub fn push_order(&mut self, order: Order) {
+        self.orders.push_front(order);
+        self.orders.truncate(100);
+    }
+}
+
+pub type SharedState = Arc<Mutex<UiState>>;

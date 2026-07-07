@@ -1,0 +1,65 @@
+# b-rs — børs-konsoll
+
+Megler-agnostisk handelskonsoll i Rust: følger aksjer på Oslo Børs (og andre
+markeder), evaluerer en strategi fortløpende og kjøper/selger via en
+utskiftbar megler-adapter. Starter alltid i **papirhandel** (simulering).
+
+```
+┌ b-rs ─ PAPIR ─ megler: paper ─ AKTIV ─ kontanter/egenkapital/P&L ────────┐
+├ Watchlist (sanntidskurser) ───────────┬ Posisjoner (bot + [NN] Nordnet) ─┤
+├ Ordrer ──────────────────────────────────────────────────────────────────┤
+└ Hendelseslogg ───────────────────────────────────────────────────────────┘
+```
+
+## Kom i gang
+
+```bash
+cp config.example.toml config.toml   # tilpass watchlist, strategi, risiko
+cargo run --release
+```
+
+Taster i konsollet: `q` avslutt · `k` kill switch (kanseller + stopp handel) · `p` pause strategi.
+
+## Arkitektur
+
+| Modul | Ansvar |
+|---|---|
+| `broker/` | `Broker`-traiten + implementasjoner: `paper` (simulering), `ibkr` (Interactive Brokers Client Portal REST) |
+| `marketdata` | Kurser og historikk fra Yahoo Finance (gratis, ~15 min forsinket; `.OL`-suffiks for Oslo Børs) |
+| `strategy` | `Strategy`-traiten + `sma_cross` (SMA-krysning) |
+| `risk` | Harde grenser: maks ordreverdi, maks posisjon, ratebegrensning, tapsgrense |
+| `engine` | Hovedløkken: kurser → strategi → risikosjekk → ordre → tilstand |
+| `nordnet` | **Lesemodus** mot Nordnets uoffisielle web-API (kun portefølje, aldri handel) |
+| `store` | SQLite-logg over alle ordrer og hendelser (feilsøking + skattegrunnlag) |
+| `ui` | ratatui-terminalgrensesnitt |
+
+Ny megler = ny implementasjon av `Broker`-traiten i `src/broker/` — resten av
+appen er uendret. Det er slik Nordnet kan kobles på den dagen de åpner sitt
+offisielle API igjen.
+
+## Live-handel med Interactive Brokers
+
+1. Last ned og start [Client Portal Gateway](https://www.interactivebrokers.com/en/trading/ib-api.php), logg inn på `https://localhost:5000`.
+2. Fyll ut `[ibkr]`-seksjonen i `config.toml` med kontonummeret ditt.
+3. Sett `mode = "live"` og `broker = "ibkr"`.
+4. Appen krever at du skriver `JA` ved oppstart før den sender ekte ordrer.
+
+**Test alltid strategien grundig i papirmodus først.** Risikogrensene i
+`[risk]` er siste skanse, ikke strategi.
+
+## Nordnet-lesemodus
+
+Setter du `nordnet.enabled = true` og miljøvariablene `NORDNET_USERNAME` /
+`NORDNET_PASSWORD`, henter appen porteføljen din fra Nordnet og viser den i
+posisjonspanelet merket `[NN]`.
+
+⚠️ Dette bruker Nordnets **uoffisielle** web-API: det kan bryte vilkårene
+deres, slutte å virke uten varsel, og fungerer ikke med BankID-pålogging.
+Modulen **leser kun** — den kan ikke legge ordrer hos Nordnet.
+
+## Ansvarsfraskrivelse
+
+Dette er et hobbyverktøy, ikke investeringsrådgivning. Automatisert handel
+kan gi raske tap. Du er selv ansvarlig for ordrene boten sender, for skatt
+(IBKR rapporterer ikke automatisk til Skatteetaten slik Nordnet gjør), og
+for at bruken din følger meglernes vilkår.
