@@ -60,6 +60,7 @@ fn main() -> Result<()> {
         broker.name(),
         cfg.nordnet.enabled,
     )));
+    state.lock().unwrap().sma_windows = (cfg.strategy.fast, cfg.strategy.slow);
     let flags = Arc::new(Flags::default());
 
     let engine = engine::Engine::new(

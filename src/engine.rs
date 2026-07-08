@@ -138,7 +138,40 @@ impl Engine {
         let equity = cash + positions.iter().map(|p| p.market_value()).sum::<f64>();
         self.risk.observe_equity(equity);
 
-        // 3) Strategisignaler → risikosjekk → ordre.
+        // 3) Manuelle ordrer fra GUI-et. De går gjennom risikoreglene og
+        //    stoppes av kill switch, men ikke av strategipausen.
+        let manual: Vec<(String, Side, f64)> = {
+            let mut st = self.state.lock().unwrap();
+            st.manual_orders.drain(..).collect()
+        };
+        for (symbol, side, qty) in manual {
+            if self.flags.killed() {
+                self.log(format!("Manuell ordre {side} {symbol} forkastet — kill switch er på."));
+                continue;
+            }
+            let price = fresh
+                .iter()
+                .find(|q| q.symbol == symbol)
+                .map(|q| q.last)
+                .or_else(|| self.state.lock().unwrap().quotes.get(&symbol).map(|q| q.last));
+            let Some(price) = price else {
+                self.log(format!("Manuell ordre: ingen kurs for {symbol} ennå."));
+                continue;
+            };
+            let held = positions.iter().find(|p| p.symbol == symbol).map_or(0.0, |p| p.qty);
+            let pos_value_after = match side {
+                Side::Buy => (held + qty) * price,
+                Side::Sell => (held - qty).max(0.0) * price,
+            };
+            match self.risk.check(qty * price, pos_value_after, equity) {
+                RiskVerdict::Blocked(reason) => {
+                    self.log(format!("Manuell {side} {symbol} blokkert av risikoregel: {reason}"));
+                }
+                RiskVerdict::Ok => self.place(&symbol, side, qty, price, "manuell ordre").await,
+            }
+        }
+
+        // 4) Strategisignaler → risikosjekk → ordre.
         if !self.flags.killed() && !self.flags.paused() {
             for q in &fresh {
                 let Some(side) = self.strategy.on_price(&q.symbol, q.last) else {
@@ -168,18 +201,20 @@ impl Engine {
                         self.log(format!("{} {} blokkert av risikoregel: {reason}", side, q.symbol));
                     }
                     RiskVerdict::Ok => {
-                        self.place(&q.symbol, side, qty, q.last).await;
+                        let note = format!("signal fra {}", self.strategy.name());
+                        self.place(&q.symbol, side, qty, q.last, &note).await;
                     }
                 }
             }
         }
 
-        // 4) Oppdater UI-tilstand.
+        // 5) Oppdater UI-tilstand.
         let positions = self.broker.positions().await.unwrap_or(positions);
         let cash = self.broker.cash().await.unwrap_or(cash);
         let equity = cash + positions.iter().map(|p| p.market_value()).sum::<f64>();
         let drawdown = self.risk.drawdown(equity);
         {
+            let now = Utc::now();
             let mut st = self.state.lock().unwrap();
             for q in fresh {
                 st.push_price(&q.symbol, q.ts.timestamp() as f64, q.last);
@@ -189,18 +224,18 @@ impl Engine {
             st.cash = cash;
             st.equity = equity;
             st.drawdown = drawdown;
-            st.last_tick = Some(Utc::now());
+            st.push_equity(now.timestamp() as f64, equity);
+            st.last_tick = Some(now);
         }
     }
 
-    async fn place(&mut self, symbol: &str, side: Side, qty: f64, price: f64) {
-        let note = format!("signal fra {}", self.strategy.name());
+    async fn place(&mut self, symbol: &str, side: Side, qty: f64, price: f64, note: &str) {
         let req = OrderRequest {
             symbol: symbol.to_string(),
             side,
             qty,
             ref_price: price,
-            note,
+            note: note.to_string(),
         };
         match self.broker.place_order(req).await {
             Ok(order) => {

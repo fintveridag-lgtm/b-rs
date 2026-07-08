@@ -1,4 +1,4 @@
-use crate::types::{ExternalPosition, Order, Position, Quote};
+use crate::types::{ExternalPosition, Order, Position, Quote, Side};
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +43,12 @@ pub struct UiState {
     pub orders: VecDeque<Order>,
     pub logs: VecDeque<(DateTime<Utc>, String)>,
     pub last_tick: Option<DateTime<Utc>>,
+    /// Egenkapital over tid denne økten som (unix-tid, verdi).
+    pub equity_history: VecDeque<(f64, f64)>,
+    /// Manuelle ordrer fra GUI-et — engine tømmer køen hver tikk.
+    pub manual_orders: VecDeque<(String, Side, f64)>,
+    /// (fast, slow) SMA-vinduer fra konfigen, så grafen kan tegne dem.
+    pub sma_windows: (usize, usize),
 }
 
 impl UiState {
@@ -61,6 +67,16 @@ impl UiState {
             orders: VecDeque::new(),
             logs: VecDeque::new(),
             last_tick: None,
+            equity_history: VecDeque::new(),
+            manual_orders: VecDeque::new(),
+            sma_windows: (5, 20),
+        }
+    }
+
+    pub fn push_equity(&mut self, ts: f64, equity: f64) {
+        self.equity_history.push_back((ts, equity));
+        if self.equity_history.len() > 5000 {
+            self.equity_history.pop_front();
         }
     }
 
