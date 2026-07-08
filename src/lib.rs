@@ -6,6 +6,7 @@ pub mod engine;
 pub mod gui;
 pub mod marketdata;
 pub mod nordnet;
+pub mod notify;
 pub mod risk;
 pub mod state;
 pub mod store;

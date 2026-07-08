@@ -52,6 +52,7 @@ Taster i terminalversjonen: `q` avslutt · `k` kill switch (kanseller + stopp ha
 | `risk` | Harde grenser: maks ordreverdi, maks posisjon, ratebegrensning, tapsgrense |
 | `engine` | Hovedløkken: kurser → strategi → risikosjekk → ordre → tilstand |
 | `nordnet` | **Lesemodus** mot Nordnets uoffisielle web-API (kun portefølje, aldri handel) |
+| `notify` | Push-varsler til mobil via ntfy.sh eller Telegram (ordrer, kill switch, tapsgrense) |
 | `store` | SQLite-logg over alle ordrer og hendelser (feilsøking + skattegrunnlag) |
 | `gui` | egui-vindusapp med kursgraf (standard) |
 | `ui` | ratatui-terminalgrensesnitt (`--tui`) |

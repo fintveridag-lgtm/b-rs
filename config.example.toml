@@ -49,6 +49,23 @@ max_daily_loss = 5000.0       # stopp all handel ved dette tapet
 # account = "U1234567"
 # accept_invalid_certs = true   # gatewayen bruker selvsignert sertifikat
 
+[notify]
+# Push-varsler til mobil: når boten handler, kill switch slås av/på,
+# og når tapsgrensen stopper handelen. Et testvarsel sendes ved oppstart.
+#
+# Enklest er "ntfy" (gratis, ingen konto):
+#   1. Installer «ntfy»-appen fra App Store / Google Play
+#   2. Trykk + i appen og abonner på et selvvalgt HEMMELIG emne,
+#      f.eks. "bors-ola-73xk1" (navnet er eneste passord — velg noe ugjettelig)
+#   3. Sett samme navn i ntfy_topic under og enabled = true
+#
+# Alternativ "telegram": lag en bot via @BotFather, sett token i
+# miljøvariabelen TELEGRAM_BOT_TOKEN og chat-id i telegram_chat_id.
+enabled = false
+provider = "ntfy"
+ntfy_topic = ""
+# telegram_chat_id = ""
+
 [nordnet]
 # Lesemodus via UOFFISIELT API — henter kun portefølje, handler aldri.
 # Kan bryte Nordnets vilkår og slutte å virke uten varsel; brukes på eget ansvar.

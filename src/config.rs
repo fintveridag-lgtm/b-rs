@@ -30,6 +30,38 @@ pub struct Config {
     pub ibkr: Option<IbkrCfg>,
     #[serde(default)]
     pub nordnet: NordnetCfg,
+    #[serde(default)]
+    pub notify: NotifyCfg,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotifyCfg {
+    /// Push-varsler til mobil når boten handler m.m.
+    #[serde(default)]
+    pub enabled: bool,
+    /// "ntfy" (enklest) eller "telegram".
+    #[serde(default = "default_notify_provider")]
+    pub provider: String,
+    #[serde(default = "default_ntfy_server")]
+    pub ntfy_server: String,
+    /// Hemmelig emnenavn du abonnerer på i ntfy-appen.
+    #[serde(default)]
+    pub ntfy_topic: String,
+    /// Telegram chat-id; bot-token settes i miljøvariabelen TELEGRAM_BOT_TOKEN.
+    #[serde(default)]
+    pub telegram_chat_id: String,
+}
+
+impl Default for NotifyCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_notify_provider(),
+            ntfy_server: default_ntfy_server(),
+            ntfy_topic: String::new(),
+            telegram_chat_id: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -154,6 +186,8 @@ fn default_max_daily_loss() -> f64 { 5_000.0 }
 fn default_ibkr_base() -> String { "https://localhost:5000/v1/api".into() }
 fn default_true() -> bool { true }
 fn default_nordnet_base() -> String { "https://www.nordnet.no/api/2".into() }
+fn default_notify_provider() -> String { "ntfy".into() }
+fn default_ntfy_server() -> String { "https://ntfy.sh".into() }
 fn default_nordnet_poll() -> u64 { 300 }
 
 impl Config {

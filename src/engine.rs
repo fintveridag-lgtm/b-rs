@@ -1,6 +1,7 @@
 use crate::broker::Broker;
 use crate::config::Config;
 use crate::marketdata::Yahoo;
+use crate::notify::Notifier;
 use crate::risk::{RiskManager, RiskVerdict};
 use crate::state::{Flags, SharedState};
 use crate::store::Store;
@@ -22,6 +23,7 @@ pub struct Engine {
     store: Arc<Store>,
     state: SharedState,
     flags: Arc<Flags>,
+    notifier: Option<Arc<Notifier>>,
     was_killed: bool,
 }
 
@@ -34,6 +36,7 @@ impl Engine {
         store: Arc<Store>,
         state: SharedState,
         flags: Arc<Flags>,
+        notifier: Option<Arc<Notifier>>,
     ) -> Self {
         let risk = RiskManager::new(cfg.risk.clone());
         Self {
@@ -45,8 +48,20 @@ impl Engine {
             store,
             state,
             flags,
+            notifier,
             was_killed: false,
         }
+    }
+
+    /// Send push-varsel til mobil i bakgrunnen (blokkerer aldri tikken).
+    fn notify(&self, message: String) {
+        let Some(notifier) = self.notifier.clone() else { return };
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = notifier.send(&message).await {
+                state.lock().unwrap().log(format!("Varsel feilet: {e:#}"));
+            }
+        });
     }
 
     fn log(&self, msg: impl Into<String>) {
@@ -84,6 +99,13 @@ impl Engine {
             self.broker.name(),
             self.strategy.name()
         ));
+        // Oppstartsvarsel — bekrefter samtidig at varselkanalen fungerer.
+        self.notify(format!(
+            "Startet i {}-modus (megler: {}, strategi: {}).",
+            self.cfg.mode,
+            self.broker.name(),
+            self.strategy.name()
+        ));
         self.seed_history().await;
 
         let mut interval = tokio::time::interval(Duration::from_secs(self.cfg.poll_secs));
@@ -105,11 +127,13 @@ impl Engine {
         let killed = self.flags.killed();
         if killed && !self.was_killed {
             self.log("KILL SWITCH aktivert — kansellerer åpne ordrer, handel stoppet.");
+            self.notify("⛔ Kill switch aktivert — all handel stoppet.".to_string());
             if let Err(e) = self.broker.cancel_all().await {
                 self.log(format!("Kansellering feilet: {e:#}"));
             }
         } else if !killed && self.was_killed {
             self.log("Kill switch deaktivert — handel gjenopptatt.");
+            self.notify("Kill switch deaktivert — handel gjenopptatt.".to_string());
         }
         self.was_killed = killed;
     }
@@ -224,6 +248,10 @@ impl Engine {
                 match self.risk.check(order_value, pos_value_after, equity) {
                     RiskVerdict::Blocked(reason) => {
                         self.log(format!("{} {} blokkert av risikoregel: {reason}", side, q.symbol));
+                        // Tapsgrensen er alvorlig nok til å vekke mobilen.
+                        if reason.contains("tapsgrense") {
+                            self.notify(format!("🛑 {reason}"));
+                        }
                     }
                     RiskVerdict::Ok => {
                         let note = format!("signal fra {}", self.strategy.name());
@@ -269,6 +297,12 @@ impl Engine {
                     "{level}: {} {} x{:.0} @ {:.2} [{}]",
                     order.side, order.symbol, order.qty, order.avg_price, order.status
                 ));
+                if order.status != OrderStatus::Rejected {
+                    self.notify(format!(
+                        "{} {} x{:.0} @ {:.2} [{}] — {}",
+                        order.side, order.symbol, order.qty, order.avg_price, order.status, order.note
+                    ));
+                }
                 let _ = self.store.record_order(&order, self.broker.name());
                 self.state.lock().unwrap().push_order(order);
             }

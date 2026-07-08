@@ -3,6 +3,7 @@ use crate::config::{self, Config};
 use crate::engine;
 use crate::gui;
 use crate::marketdata;
+use crate::notify::Notifier;
 use crate::state::{Flags, UiState};
 use crate::store;
 use crate::strategy;
@@ -48,6 +49,12 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
     }
     let flags = Arc::new(Flags::default());
 
+    let notifier = if cfg.notify.enabled {
+        Some(Arc::new(Notifier::new(&cfg.notify)?))
+    } else {
+        None
+    };
+
     let engine = engine::Engine::new(
         cfg.clone(),
         broker,
@@ -56,6 +63,7 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
         store,
         state.clone(),
         flags.clone(),
+        notifier,
     );
     rt.spawn(engine.run());
 
