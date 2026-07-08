@@ -17,23 +17,7 @@ use std::sync::{Arc, Mutex};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config_path = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("config.toml"));
-
-    let cfg = if config_path.exists() {
-        config::Config::load(&config_path)?
-    } else {
-        let fallback = PathBuf::from("config.example.toml");
-        anyhow::ensure!(
-            fallback.exists(),
-            "fant verken {} eller config.example.toml — kopier eksempelfilen til config.toml",
-            config_path.display()
-        );
-        eprintln!("Fant ikke {} — bruker config.example.toml (papirhandel).", config_path.display());
-        config::Config::load(&fallback)?
-    };
+    let cfg = load_config()?;
 
     // Sikkerhetsbarriere: live-handel må bekreftes eksplisitt i terminalen.
     if cfg.is_live() {
@@ -100,6 +84,38 @@ async fn main() -> Result<()> {
         h.abort();
     }
     ui_result
+}
+
+/// Finn konfigurasjonen, i prioritert rekkefølge:
+///   1. sti gitt som kommandolinjeargument
+///   2. config.toml i arbeidsmappen
+///   3. config.toml / config.example.toml ved siden av programfilen
+///   4. innebygd standardkonfig (papirhandel)
+/// Punkt 3 og 4 gjør at programfilen kan dobbeltklikkes hvor som helst.
+fn load_config() -> Result<config::Config> {
+    if let Some(arg) = std::env::args().nth(1) {
+        return config::Config::load(&PathBuf::from(arg));
+    }
+
+    let local = PathBuf::from("config.toml");
+    if local.exists() {
+        return config::Config::load(&local);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for name in ["config.toml", "config.example.toml"] {
+                let candidate = dir.join(name);
+                if candidate.exists() {
+                    eprintln!("Bruker konfig fra {}", candidate.display());
+                    return config::Config::load(&candidate);
+                }
+            }
+        }
+    }
+
+    eprintln!("Fant ingen config.toml — bruker innebygd standardkonfig (papirhandel).");
+    config::Config::parse(include_str!("../config.example.toml"))
 }
 
 mod ui;

@@ -135,11 +135,8 @@ fn default_nordnet_base() -> String { "https://www.nordnet.no/api/2".into() }
 fn default_nordnet_poll() -> u64 { 300 }
 
 impl Config {
-    pub fn load(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("kunne ikke lese konfigfil {}", path.display()))?;
-        let cfg: Config = toml::from_str(&raw)
-            .with_context(|| format!("ugyldig konfig i {}", path.display()))?;
+    pub fn parse(raw: &str) -> Result<Self> {
+        let cfg: Config = toml::from_str(raw).context("ugyldig konfig")?;
         anyhow::ensure!(!cfg.watchlist.is_empty(), "watchlist kan ikke være tom");
         anyhow::ensure!(
             cfg.strategy.fast < cfg.strategy.slow,
@@ -149,6 +146,12 @@ impl Config {
             anyhow::ensure!(cfg.ibkr.is_some(), "mode=live med broker=ibkr krever [ibkr]-seksjon");
         }
         Ok(cfg)
+    }
+
+    pub fn load(path: &Path) -> Result<Self> {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("kunne ikke lese konfigfil {}", path.display()))?;
+        Self::parse(&raw).with_context(|| format!("feil i {}", path.display()))
     }
 
     pub fn is_live(&self) -> bool {
