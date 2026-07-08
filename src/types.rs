@@ -93,6 +93,16 @@ impl Position {
     }
 }
 
+/// Én dags OHLC-stolpe — grunnlag for candlestick-grafen og backtesting.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Candle {
+    pub ts: f64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+}
+
 /// Posisjon lest fra Nordnet (lesemodus — handles aldri på).
 #[derive(Debug, Clone)]
 pub struct ExternalPosition {

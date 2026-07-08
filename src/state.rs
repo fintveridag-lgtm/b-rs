@@ -1,4 +1,5 @@
-use crate::types::{ExternalPosition, Order, Position, Quote, Side};
+use crate::config::StrategyCfg;
+use crate::types::{Candle, ExternalPosition, Order, Position, Quote, Side};
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,6 +50,14 @@ pub struct UiState {
     pub manual_orders: VecDeque<(String, Side, f64)>,
     /// (fast, slow) SMA-vinduer fra konfigen, så grafen kan tegne dem.
     pub sma_windows: (usize, usize),
+    /// Daglige OHLC-stolper per symbol — candlestick-graf og backtesting.
+    pub candles: BTreeMap<String, Vec<Candle>>,
+    /// Strategien engine kjører akkurat nå.
+    pub strategy_name: String,
+    /// Settes av GUI-et når brukeren vil bytte strategi; engine plukker den opp.
+    pub strategy_request: Option<String>,
+    /// Strategiparametre fra konfigen — brukes av backtesting i GUI-et.
+    pub strategy_cfg: StrategyCfg,
 }
 
 impl UiState {
@@ -70,6 +79,10 @@ impl UiState {
             equity_history: VecDeque::new(),
             manual_orders: VecDeque::new(),
             sma_windows: (5, 20),
+            candles: BTreeMap::new(),
+            strategy_name: String::new(),
+            strategy_request: None,
+            strategy_cfg: StrategyCfg::default(),
         }
     }
 

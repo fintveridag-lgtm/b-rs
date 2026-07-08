@@ -1,8 +1,10 @@
+use crate::backtest::{self, BacktestResult};
 use crate::state::{Flags, SharedState, UiState};
+use crate::strategy;
 use crate::types::Side;
 use anyhow::Result;
 use eframe::egui::{self, Color32, RichText};
-use egui_plot::{Legend, Line, Plot, PlotPoints};
+use egui_plot::{BoxElem, BoxPlot, BoxSpread, Legend, Line, Plot, PlotPoints};
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -17,6 +19,12 @@ const BG_PANEL: Color32 = Color32::from_rgb(13, 22, 38);
 const BG_DEEP: Color32 = Color32::from_rgb(9, 15, 27);
 const BG_CARD: Color32 = Color32::from_rgb(20, 32, 54);
 const BORDER: Color32 = Color32::from_rgb(35, 52, 80);
+
+#[derive(Clone, Copy, PartialEq)]
+enum ChartStyle {
+    Line,
+    Candles,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum ChartRange {
@@ -55,7 +63,10 @@ pub fn run(state: SharedState, flags: Arc<Flags>) -> Result<()> {
         flags: flags.clone(),
         selected: None,
         range: ChartRange::ThreeMonths,
+        style: ChartStyle::Line,
         trade_qty: 10.0,
+        strategy_choice: String::new(),
+        backtest: None,
     };
     let result = eframe::run_native(
         "b-rs",
@@ -104,7 +115,10 @@ struct App {
     flags: Arc<Flags>,
     selected: Option<String>,
     range: ChartRange,
+    style: ChartStyle,
     trade_qty: f64,
+    strategy_choice: String,
+    backtest: Option<std::result::Result<BacktestResult, String>>,
 }
 
 impl eframe::App for App {
@@ -116,6 +130,9 @@ impl eframe::App for App {
         let mut st = state.lock().unwrap();
         if self.selected.is_none() {
             self.selected = st.quotes.keys().next().cloned();
+        }
+        if self.strategy_choice.is_empty() && !st.strategy_name.is_empty() {
+            self.strategy_choice = st.strategy_name.clone();
         }
 
         self.top_bar(ctx, &st);
@@ -193,6 +210,7 @@ impl App {
         egui::SidePanel::left("venstre")
             .default_width(310.0)
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical().id_salt("venstre_scroll").show(ui, |ui| {
                 ui.add_space(6.0);
                 section_heading(ui, "📋 Watchlist");
                 ui.small("Klikk på et symbol for å vise grafen.");
@@ -216,6 +234,57 @@ impl App {
                 });
                 if st.quotes.is_empty() {
                     ui.spinner();
+                }
+
+                // Strategivalg og backtesting.
+                ui.add_space(10.0);
+                ui.separator();
+                section_heading(ui, "🧠 Strategi");
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("strategivalg")
+                        .selected_text(&self.strategy_choice)
+                        .show_ui(ui, |ui| {
+                            for name in strategy::AVAILABLE {
+                                ui.selectable_value(&mut self.strategy_choice, name.to_string(), name);
+                            }
+                        });
+                    let active = self.strategy_choice == st.strategy_name;
+                    if active {
+                        ui.label(RichText::new("aktiv").color(GREEN).small());
+                    } else if ui.button("Aktiver").clicked() {
+                        st.strategy_request = Some(self.strategy_choice.clone());
+                    }
+                });
+                if ui.button("🧪 Backtest på valgt symbol (3 mnd)").clicked() {
+                    self.backtest = Some(run_backtest(self.selected.as_deref(), &self.strategy_choice, st));
+                }
+                match &self.backtest {
+                    Some(Ok(r)) => {
+                        ui.label(
+                            RichText::new(format!("{} på {}", r.strategy, r.symbol)).strong(),
+                        );
+                        let color = if r.return_pct >= 0.0 { GREEN } else { RED };
+                        ui.label(RichText::new(format!("Avkastning: {:+.1} %", r.return_pct)).color(color).strong());
+                        let bh_color = if r.buy_hold_pct >= 0.0 { GREEN } else { RED };
+                        ui.horizontal(|ui| {
+                            ui.label("Kjøp-og-hold:");
+                            ui.label(RichText::new(format!("{:+.1} %", r.buy_hold_pct)).color(bh_color));
+                        });
+                        let wins = r.wins();
+                        ui.label(format!(
+                            "{} handler, {} med gevinst{}",
+                            r.trades.len(),
+                            wins,
+                            if r.open_entry.is_some() { " (én fortsatt åpen)" } else { "" }
+                        ));
+                        ui.small("Forenklet: uten kurtasje og glidning.");
+                    }
+                    Some(Err(e)) => {
+                        ui.label(RichText::new(e).color(RED).small());
+                    }
+                    None => {
+                        ui.small("Test strategien på historikken før du lar den handle.");
+                    }
                 }
 
                 // Hurtighandel — manuelle ordrer på valgt symbol.
@@ -287,6 +356,7 @@ impl App {
                 if st.nordnet_enabled {
                     ui.small("[NN] = Nordnet-portefølje (kun lesing).");
                 }
+                });
             });
     }
 
@@ -359,6 +429,9 @@ impl App {
                     ui.selectable_value(&mut self.range, ChartRange::ThreeMonths, "3 mnd");
                     ui.selectable_value(&mut self.range, ChartRange::Month, "1 mnd");
                     ui.selectable_value(&mut self.range, ChartRange::Week, "1 uke");
+                    ui.separator();
+                    ui.selectable_value(&mut self.style, ChartStyle::Candles, "🕯 Candles");
+                    ui.selectable_value(&mut self.style, ChartStyle::Line, "📈 Linje");
                 });
             });
 
@@ -406,7 +479,38 @@ impl App {
                     }
                 })
                 .show(ui, |plot_ui| {
-                    plot_ui.line(Line::new(PlotPoints::from(price_pts)).color(GREEN).width(2.0).name("Kurs"));
+                    match self.style {
+                        ChartStyle::Line => {
+                            plot_ui.line(Line::new(PlotPoints::from(price_pts)).color(GREEN).width(2.0).name("Kurs"));
+                        }
+                        ChartStyle::Candles => {
+                            let elems: Vec<BoxElem> = st
+                                .candles
+                                .get(&symbol)
+                                .map(|candles| {
+                                    candles
+                                        .iter()
+                                        .filter(|c| cutoff.is_none_or(|cut| c.ts >= cut))
+                                        .map(|c| {
+                                            let up = c.close >= c.open;
+                                            let color = if up { GREEN } else { RED };
+                                            let body_lo = c.open.min(c.close);
+                                            let body_hi = c.open.max(c.close);
+                                            BoxElem::new(
+                                                c.ts,
+                                                BoxSpread::new(c.low, body_lo, (body_lo + body_hi) / 2.0, body_hi, c.high),
+                                            )
+                                            .box_width(86400.0 * 0.6)
+                                            .whisker_width(0.0)
+                                            .fill(color.gamma_multiply(0.7))
+                                            .stroke(egui::Stroke::new(1.0, color))
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            plot_ui.box_plot(BoxPlot::new(elems).name("Dagsstolper"));
+                        }
+                    }
                     plot_ui.line(
                         Line::new(PlotPoints::from(fast_pts))
                             .color(YELLOW)
@@ -420,7 +524,7 @@ impl App {
                             .name(format!("SMA {slow_n} (treg)")),
                     );
                 });
-            ui.small("Strategien kjøper når gul (rask) krysser over blå (treg), og selger ved kryss under. Zoom med musehjulet.");
+            ui.small("Strategien sma_cross kjøper når gul (rask) krysser over blå (treg), og selger ved kryss under. Zoom med musehjulet.");
 
             ui.add_space(6.0);
             ui.label(RichText::new("Egenkapital denne økten").strong().color(GRAY));
@@ -437,6 +541,21 @@ impl App {
                 });
         });
     }
+}
+
+/// Kjør backtest på valgt symbol med valgt strategi over dagsstolpene.
+fn run_backtest(
+    selected: Option<&str>,
+    strategy_name: &str,
+    st: &UiState,
+) -> std::result::Result<BacktestResult, String> {
+    let Some(symbol) = selected else {
+        return Err("Velg et symbol i watchlisten først.".into());
+    };
+    let Some(candles) = st.candles.get(symbol) else {
+        return Err("Ingen historikk ennå — vent til kursene er lastet.".into());
+    };
+    backtest::run(symbol, candles, strategy_name, &st.strategy_cfg).map_err(|e| format!("{e:#}"))
 }
 
 /// Rullerende gjennomsnitt over (tid, kurs)-serien — samme beregning som

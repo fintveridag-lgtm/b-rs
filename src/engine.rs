@@ -59,16 +59,17 @@ impl Engine {
     pub async fn seed_history(&mut self) {
         for symbol in self.cfg.watchlist.clone() {
             match self.market.history_daily(&symbol, "3mo").await {
-                Ok(points) if !points.is_empty() => {
-                    let closes: Vec<f64> = points.iter().map(|&(_, c)| c).collect();
+                Ok(bars) if !bars.is_empty() => {
+                    let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
                     self.strategy.seed(&symbol, &closes);
                     {
                         let mut st = self.state.lock().unwrap();
-                        for &(t, c) in &points {
-                            st.push_price(&symbol, t as f64, c);
+                        for b in &bars {
+                            st.push_price(&symbol, b.ts, b.close);
                         }
+                        st.candles.insert(symbol.clone(), bars.clone());
                     }
-                    self.log(format!("{symbol}: sådd med {} dagers historikk", points.len()));
+                    self.log(format!("{symbol}: sådd med {} dagers historikk", bars.len()));
                 }
                 Ok(_) => self.log(format!("{symbol}: tom historikk fra Yahoo")),
                 Err(e) => self.log(format!("{symbol}: klarte ikke hente historikk: {e:#}")),
@@ -113,7 +114,31 @@ impl Engine {
         self.was_killed = killed;
     }
 
+    /// Bytt strategi på forespørsel fra GUI-et: bygg den nye og så den med
+    /// historikken vi allerede har, så den er varm fra første tikk.
+    fn handle_strategy_switch(&mut self) {
+        let request = self.state.lock().unwrap().strategy_request.take();
+        let Some(name) = request else { return };
+        let mut cfg = self.cfg.strategy.clone();
+        cfg.name = name.clone();
+        match crate::strategy::build(&cfg) {
+            Ok(mut fresh) => {
+                let history = self.state.lock().unwrap().history.clone();
+                for (symbol, points) in history {
+                    let closes: Vec<f64> = points.iter().map(|&(_, p)| p).collect();
+                    fresh.seed(&symbol, &closes);
+                }
+                self.strategy = fresh;
+                self.state.lock().unwrap().strategy_name = name.clone();
+                self.log(format!("Strategi byttet til {name}."));
+            }
+            Err(e) => self.log(format!("Kunne ikke bytte strategi: {e:#}")),
+        }
+    }
+
     async fn tick(&mut self) {
+        self.handle_strategy_switch();
+
         // 1) Hent kurser.
         let mut fresh = Vec::new();
         for symbol in &self.cfg.watchlist {

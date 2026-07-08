@@ -20,9 +20,20 @@ cp config.example.toml config.toml   # tilpass watchlist, strategi, risiko
 cargo run --release
 ```
 
-Dette åpner den **grafiske appen**: watchlist, interaktiv kursgraf (klikk på
-et symbol), posisjoner, ordrer, hendelseslogg og knapper for kill switch og
-pause. Vil du heller ha terminalversjonen:
+Dette åpner den **grafiske appen**: watchlist, interaktiv kursgraf med
+linje- eller candlestick-visning og strategiens SMA-linjer, strategivelger
+med backtesting, hurtighandel, posisjoner, ordrer, hendelseslogg og knapper
+for kill switch og pause.
+
+Det bygges to programfiler:
+
+- `b-rs` — med konsollvindu bak (viser feilmeldinger, støtter `--tui` og
+  JA-bekreftelsen for live-handel)
+- `b-rs-gui` — **ren vindusapp uten konsoll**, den du vil ha på skrivebordet.
+  Av sikkerhetsgrunner krever den `live_ok = true` i konfigen for live-handel;
+  ellers kjører den papirmodus.
+
+Vil du heller ha terminalversjonen:
 
 ```bash
 cargo run --release -- --tui
@@ -36,7 +47,8 @@ Taster i terminalversjonen: `q` avslutt · `k` kill switch (kanseller + stopp ha
 |---|---|
 | `broker/` | `Broker`-traiten + implementasjoner: `paper` (simulering), `ibkr` (Interactive Brokers Client Portal REST) |
 | `marketdata` | Kurser og historikk fra Yahoo Finance (gratis, ~15 min forsinket; `.OL`-suffiks for Oslo Børs) |
-| `strategy` | `Strategy`-traiten + `sma_cross` (SMA-krysning) |
+| `strategy` | `Strategy`-traiten + `sma_cross`, `rsi` og `momentum` — byttes i appen |
+| `backtest` | Kjør en strategi over historikken og sammenlign med kjøp-og-hold |
 | `risk` | Harde grenser: maks ordreverdi, maks posisjon, ratebegrensning, tapsgrense |
 | `engine` | Hovedløkken: kurser → strategi → risikosjekk → ordre → tilstand |
 | `nordnet` | **Lesemodus** mot Nordnets uoffisielle web-API (kun portefølje, aldri handel) |

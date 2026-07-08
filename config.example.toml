@@ -3,6 +3,10 @@
 # "paper" = simulering (trygt, standard). "live" = ekte ordrer via megleren under.
 mode = "paper"
 
+# Den konsoll-løse vindusappen (b-rs-gui.exe) kan ikke stille JA-spørsmålet,
+# så den krever i tillegg live_ok = true for å handle live. Ellers papirmodus.
+live_ok = false
+
 # "paper" eller "ibkr" (Interactive Brokers via Client Portal Gateway).
 broker = "paper"
 
@@ -20,10 +24,16 @@ starting_cash = 100000.0
 db_path = "b-rs.db"
 
 [strategy]
-name = "sma_cross"   # kjøp når rask SMA krysser over treg, selg ved kryss under
-fast = 5
-slow = 20
+# Strategier: "sma_cross" (SMA-krysning), "rsi" (oversolgt/overkjøpt),
+# "momentum" (brudd på høyeste/laveste). Kan også byttes inne i appen.
+name = "sma_cross"
+fast = 5             # sma_cross: rask SMA
+slow = 20            # sma_cross: treg SMA
 order_qty = 10       # antall aksjer per kjøp
+rsi_period = 14      # rsi: periode
+rsi_buy_below = 30.0 # rsi: kjøp under denne
+rsi_sell_above = 70.0 # rsi: selg over denne
+momentum_window = 20 # momentum: vindu for brudd
 
 [risk]
 max_order_value = 10000.0     # maks verdi per enkeltordre

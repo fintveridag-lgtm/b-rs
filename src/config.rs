@@ -19,6 +19,10 @@ pub struct Config {
     pub starting_cash: f64,
     #[serde(default = "default_db_path")]
     pub db_path: String,
+    /// Kreves av den konsoll-løse GUI-varianten (b-rs-gui) for live-handel,
+    /// siden den ikke kan stille JA-spørsmålet i terminalen.
+    #[serde(default)]
+    pub live_ok: bool,
     #[serde(default)]
     pub strategy: StrategyCfg,
     #[serde(default)]
@@ -41,6 +45,16 @@ pub struct StrategyCfg {
     /// Antall aksjer per kjøpsordre.
     #[serde(default = "default_order_qty")]
     pub order_qty: f64,
+    /// RSI-strategien: periode og terskler.
+    #[serde(default = "default_rsi_period")]
+    pub rsi_period: usize,
+    #[serde(default = "default_rsi_buy_below")]
+    pub rsi_buy_below: f64,
+    #[serde(default = "default_rsi_sell_above")]
+    pub rsi_sell_above: f64,
+    /// Momentum-strategien: vindu for brudd på høyeste/laveste.
+    #[serde(default = "default_momentum_window")]
+    pub momentum_window: usize,
 }
 
 impl Default for StrategyCfg {
@@ -50,6 +64,10 @@ impl Default for StrategyCfg {
             fast: default_fast(),
             slow: default_slow(),
             order_qty: default_order_qty(),
+            rsi_period: default_rsi_period(),
+            rsi_buy_below: default_rsi_buy_below(),
+            rsi_sell_above: default_rsi_sell_above(),
+            momentum_window: default_momentum_window(),
         }
     }
 }
@@ -125,6 +143,10 @@ fn default_strategy_name() -> String { "sma_cross".into() }
 fn default_fast() -> usize { 5 }
 fn default_slow() -> usize { 20 }
 fn default_order_qty() -> f64 { 10.0 }
+fn default_rsi_period() -> usize { 14 }
+fn default_rsi_buy_below() -> f64 { 30.0 }
+fn default_rsi_sell_above() -> f64 { 70.0 }
+fn default_momentum_window() -> usize { 20 }
 fn default_max_order_value() -> f64 { 10_000.0 }
 fn default_max_position_value() -> f64 { 25_000.0 }
 fn default_max_orders_per_min() -> u32 { 4 }

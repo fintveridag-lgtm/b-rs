@@ -1,4 +1,4 @@
-use crate::types::Quote;
+use crate::types::{Candle, Quote};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde_json::Value;
@@ -40,9 +40,9 @@ impl Yahoo {
         parse_quote(symbol, &result)
     }
 
-    /// Daglige (unix-tid, sluttkurs)-par, eldst først. Brukes til å så
-    /// strategien ved oppstart og som startdata for kursgrafen.
-    pub async fn history_daily(&self, symbol: &str, range: &str) -> Result<Vec<(i64, f64)>> {
+    /// Daglige OHLC-stolper, eldst først. Brukes til å så strategien ved
+    /// oppstart, som startdata for kursgrafen, og til backtesting.
+    pub async fn history_daily(&self, symbol: &str, range: &str) -> Result<Vec<Candle>> {
         let result = self.chart(symbol, range, "1d").await?;
         parse_history(symbol, &result)
     }
@@ -69,21 +69,35 @@ fn parse_quote(symbol: &str, result: &Value) -> Result<Quote> {
     })
 }
 
-fn parse_history(symbol: &str, result: &Value) -> Result<Vec<(i64, f64)>> {
+fn parse_history(symbol: &str, result: &Value) -> Result<Vec<Candle>> {
     let timestamps = result
         .pointer("/timestamp")
         .and_then(Value::as_array)
         .with_context(|| format!("mangler tidsstempler for {symbol}"))?;
-    let closes = result
-        .pointer("/indicators/quote/0/close")
-        .and_then(Value::as_array)
+    let quote = result
+        .pointer("/indicators/quote/0")
         .with_context(|| format!("mangler historikk for {symbol}"))?;
+    let series = |key: &str| quote.get(key).and_then(Value::as_array);
+    let (Some(open), Some(high), Some(low), Some(close)) =
+        (series("open"), series("high"), series("low"), series("close"))
+    else {
+        anyhow::bail!("mangler OHLC-serier for {symbol}");
+    };
     // Yahoo bruker null for dager uten omsetning — hopp over dem.
-    Ok(timestamps
-        .iter()
-        .zip(closes)
-        .filter_map(|(t, c)| Some((t.as_i64()?, c.as_f64()?)))
-        .collect())
+    let mut out = Vec::with_capacity(timestamps.len());
+    for i in 0..timestamps.len() {
+        let value = |arr: &Vec<Value>| arr.get(i).and_then(Value::as_f64);
+        if let (Some(ts), Some(o), Some(h), Some(l), Some(c)) = (
+            timestamps.get(i).and_then(Value::as_i64),
+            value(open),
+            value(high),
+            value(low),
+            value(close),
+        ) {
+            out.push(Candle { ts: ts as f64, open: o, high: h, low: l, close: c });
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -109,11 +123,19 @@ mod tests {
     #[test]
     fn parses_history_and_skips_nulls() {
         let result = json!({
-            "timestamp": [1700000000, 1700086400, 1700172800, 1700259200],
-            "indicators": { "quote": [ { "close": [100.0, null, 101.5, 102.0] } ] }
+            "timestamp": [1700000000, 1700086400, 1700172800],
+            "indicators": { "quote": [ {
+                "open":  [ 99.0, null, 101.0],
+                "high":  [101.0, null, 103.0],
+                "low":   [ 98.0, null, 100.5],
+                "close": [100.0, null, 102.0]
+            } ] }
         });
-        let points = parse_history("EQNR.OL", &result).unwrap();
-        assert_eq!(points, vec![(1700000000, 100.0), (1700172800, 101.5), (1700259200, 102.0)]);
+        let candles = parse_history("EQNR.OL", &result).unwrap();
+        assert_eq!(candles.len(), 2);
+        assert_eq!(candles[0].ts, 1700000000.0);
+        assert_eq!(candles[0].close, 100.0);
+        assert_eq!(candles[1].high, 103.0);
     }
 
     #[test]

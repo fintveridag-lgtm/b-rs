@@ -4,6 +4,19 @@ version = "0.1.0"
 edition = "2021"
 description = "Børs-konsoll: megler-agnostisk handelsbot med papirhandel, IBKR-adapter og Nordnet-lesemodus"
 
+[lib]
+name = "b_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "b-rs"
+path = "src/main.rs"
+
+# Ren vindusapp uten konsollvindu bak (for dobbeltklikk på Windows).
+[[bin]]
+name = "b-rs-gui"
+path = "src/gui_main.rs"
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
