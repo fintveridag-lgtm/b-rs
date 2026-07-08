@@ -1,3 +1,5 @@
+<img src="assets/logo.png" align="right" width="96" alt="b-rs-logo">
+
 # b-rs — børs-konsoll
 
 Megler-agnostisk handelskonsoll i Rust: følger aksjer på Oslo Børs (og andre
