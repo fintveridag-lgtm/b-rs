@@ -59,9 +59,16 @@ impl Engine {
     pub async fn seed_history(&mut self) {
         for symbol in self.cfg.watchlist.clone() {
             match self.market.history_daily(&symbol, "3mo").await {
-                Ok(closes) if !closes.is_empty() => {
+                Ok(points) if !points.is_empty() => {
+                    let closes: Vec<f64> = points.iter().map(|&(_, c)| c).collect();
                     self.strategy.seed(&symbol, &closes);
-                    self.log(format!("{symbol}: sådd med {} dagers historikk", closes.len()));
+                    {
+                        let mut st = self.state.lock().unwrap();
+                        for &(t, c) in &points {
+                            st.push_price(&symbol, t as f64, c);
+                        }
+                    }
+                    self.log(format!("{symbol}: sådd med {} dagers historikk", points.len()));
                 }
                 Ok(_) => self.log(format!("{symbol}: tom historikk fra Yahoo")),
                 Err(e) => self.log(format!("{symbol}: klarte ikke hente historikk: {e:#}")),
@@ -175,6 +182,7 @@ impl Engine {
         {
             let mut st = self.state.lock().unwrap();
             for q in fresh {
+                st.push_price(&q.symbol, q.ts.timestamp() as f64, q.last);
                 st.quotes.insert(q.symbol.clone(), q);
             }
             st.positions = positions;

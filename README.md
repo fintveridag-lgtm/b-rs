@@ -20,7 +20,15 @@ cp config.example.toml config.toml   # tilpass watchlist, strategi, risiko
 cargo run --release
 ```
 
-Taster i konsollet: `q` avslutt · `k` kill switch (kanseller + stopp handel) · `p` pause strategi.
+Dette åpner den **grafiske appen**: watchlist, interaktiv kursgraf (klikk på
+et symbol), posisjoner, ordrer, hendelseslogg og knapper for kill switch og
+pause. Vil du heller ha terminalversjonen:
+
+```bash
+cargo run --release -- --tui
+```
+
+Taster i terminalversjonen: `q` avslutt · `k` kill switch (kanseller + stopp handel) · `p` pause strategi.
 
 ## Arkitektur
 
@@ -33,7 +41,8 @@ Taster i konsollet: `q` avslutt · `k` kill switch (kanseller + stopp handel) ·
 | `engine` | Hovedløkken: kurser → strategi → risikosjekk → ordre → tilstand |
 | `nordnet` | **Lesemodus** mot Nordnets uoffisielle web-API (kun portefølje, aldri handel) |
 | `store` | SQLite-logg over alle ordrer og hendelser (feilsøking + skattegrunnlag) |
-| `ui` | ratatui-terminalgrensesnitt |
+| `gui` | egui-vindusapp med kursgraf (standard) |
+| `ui` | ratatui-terminalgrensesnitt (`--tui`) |
 
 Ny megler = ny implementasjon av `Broker`-traiten i `src/broker/` — resten av
 appen er uendret. Det er slik Nordnet kan kobles på den dagen de åpner sitt

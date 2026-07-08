@@ -41,9 +41,6 @@ pub struct Quote {
     pub symbol: String,
     pub last: f64,
     pub prev_close: f64,
-    /// Når kursen ble hentet — beholdes i modellen selv om UI-et i dag
-    /// viser felles oppdateringstid per tikk.
-    #[allow(dead_code)]
     pub ts: DateTime<Utc>,
 }
 

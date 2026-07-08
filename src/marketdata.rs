@@ -40,10 +40,11 @@ impl Yahoo {
         parse_quote(symbol, &result)
     }
 
-    /// Daglige sluttkurser, eldst først. Brukes til å så strategien ved oppstart.
-    pub async fn history_daily(&self, symbol: &str, range: &str) -> Result<Vec<f64>> {
+    /// Daglige (unix-tid, sluttkurs)-par, eldst først. Brukes til å så
+    /// strategien ved oppstart og som startdata for kursgrafen.
+    pub async fn history_daily(&self, symbol: &str, range: &str) -> Result<Vec<(i64, f64)>> {
         let result = self.chart(symbol, range, "1d").await?;
-        parse_closes(symbol, &result)
+        parse_history(symbol, &result)
     }
 }
 
@@ -68,13 +69,21 @@ fn parse_quote(symbol: &str, result: &Value) -> Result<Quote> {
     })
 }
 
-fn parse_closes(symbol: &str, result: &Value) -> Result<Vec<f64>> {
+fn parse_history(symbol: &str, result: &Value) -> Result<Vec<(i64, f64)>> {
+    let timestamps = result
+        .pointer("/timestamp")
+        .and_then(Value::as_array)
+        .with_context(|| format!("mangler tidsstempler for {symbol}"))?;
     let closes = result
         .pointer("/indicators/quote/0/close")
         .and_then(Value::as_array)
         .with_context(|| format!("mangler historikk for {symbol}"))?;
     // Yahoo bruker null for dager uten omsetning — hopp over dem.
-    Ok(closes.iter().filter_map(Value::as_f64).collect())
+    Ok(timestamps
+        .iter()
+        .zip(closes)
+        .filter_map(|(t, c)| Some((t.as_i64()?, c.as_f64()?)))
+        .collect())
 }
 
 #[cfg(test)]
@@ -98,12 +107,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_closes_and_skips_nulls() {
+    fn parses_history_and_skips_nulls() {
         let result = json!({
+            "timestamp": [1700000000, 1700086400, 1700172800, 1700259200],
             "indicators": { "quote": [ { "close": [100.0, null, 101.5, 102.0] } ] }
         });
-        let closes = parse_closes("EQNR.OL", &result).unwrap();
-        assert_eq!(closes, vec![100.0, 101.5, 102.0]);
+        let points = parse_history("EQNR.OL", &result).unwrap();
+        assert_eq!(points, vec![(1700000000, 100.0), (1700172800, 101.5), (1700259200, 102.0)]);
     }
 
     #[test]

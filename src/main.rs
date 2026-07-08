@@ -1,6 +1,7 @@
 mod broker;
 mod config;
 mod engine;
+mod gui;
 mod marketdata;
 mod nordnet;
 mod risk;
@@ -8,6 +9,7 @@ mod state;
 mod store;
 mod strategy;
 mod types;
+mod ui;
 
 use anyhow::{Context, Result};
 use broker::Broker;
@@ -15,9 +17,13 @@ use state::{Flags, UiState};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cfg = load_config()?;
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Standard er grafisk vindu; --tui gir terminalversjonen.
+    let use_tui = args.iter().any(|a| a == "--tui");
+    let config_arg = args.iter().find(|a| !a.starts_with("--")).cloned();
+
+    let cfg = load_config(config_arg)?;
 
     // Sikkerhetsbarriere: live-handel må bekreftes eksplisitt i terminalen.
     if cfg.is_live() {
@@ -28,12 +34,18 @@ async fn main() -> Result<()> {
         anyhow::ensure!(answer.trim() == "JA", "avbrutt — endre mode til \"paper\" for simulering");
     }
 
+    // Engine og meglere er async — de kjører på en tokio-runtime i bakgrunnen,
+    // mens GUI/TUI eier hovedtråden.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
     let broker: Arc<dyn Broker> = match (cfg.is_live(), cfg.broker.as_str()) {
         (false, _) | (true, "paper") => Arc::new(broker::paper::PaperBroker::new(cfg.starting_cash)),
         (true, "ibkr") => {
             let ibkr_cfg = cfg.ibkr.as_ref().context("[ibkr]-seksjon mangler i konfig")?;
             let b = broker::ibkr::IbkrBroker::new(ibkr_cfg)?;
-            b.check_session().await?;
+            rt.block_on(b.check_session())?;
             Arc::new(b)
         }
         (true, other) => anyhow::bail!("ukjent megler: {other}"),
@@ -50,7 +62,6 @@ async fn main() -> Result<()> {
     )));
     let flags = Arc::new(Flags::default());
 
-    // Engine i bakgrunnen.
     let engine = engine::Engine::new(
         cfg.clone(),
         broker,
@@ -60,30 +71,22 @@ async fn main() -> Result<()> {
         state.clone(),
         flags.clone(),
     );
-    let engine_handle = tokio::spawn(engine.run());
+    rt.spawn(engine.run());
 
-    // Nordnet-lesemodus i egen oppgave.
-    let nordnet_handle = if cfg.nordnet.enabled {
-        Some(tokio::spawn(engine::nordnet_task(
-            cfg.clone(),
-            state.clone(),
-            flags.clone(),
-        )))
+    if cfg.nordnet.enabled {
+        rt.spawn(engine::nordnet_task(cfg.clone(), state.clone(), flags.clone()));
+    }
+
+    // UI-et blokkerer hovedtråden til brukeren avslutter.
+    let result = if use_tui {
+        ui::run(state, flags.clone())
     } else {
-        None
+        gui::run(state, flags.clone())
     };
 
-    // TUI-et blokkerer til brukeren avslutter.
-    let ui_state = state.clone();
-    let ui_flags = flags.clone();
-    let ui_result = tokio::task::spawn_blocking(move || ui::run(ui_state, ui_flags)).await?;
-
     flags.quit.store(true, std::sync::atomic::Ordering::Relaxed);
-    let _ = engine_handle.await;
-    if let Some(h) = nordnet_handle {
-        h.abort();
-    }
-    ui_result
+    rt.shutdown_timeout(std::time::Duration::from_secs(5));
+    result
 }
 
 /// Finn konfigurasjonen, i prioritert rekkefølge:
@@ -92,8 +95,8 @@ async fn main() -> Result<()> {
 ///   3. config.toml / config.example.toml ved siden av programfilen
 ///   4. innebygd standardkonfig (papirhandel)
 /// Punkt 3 og 4 gjør at programfilen kan dobbeltklikkes hvor som helst.
-fn load_config() -> Result<config::Config> {
-    if let Some(arg) = std::env::args().nth(1) {
+fn load_config(config_arg: Option<String>) -> Result<config::Config> {
+    if let Some(arg) = config_arg {
         return config::Config::load(&PathBuf::from(arg));
     }
 
@@ -117,5 +120,3 @@ fn load_config() -> Result<config::Config> {
     eprintln!("Fant ingen config.toml — bruker innebygd standardkonfig (papirhandel).");
     config::Config::parse(include_str!("../config.example.toml"))
 }
-
-mod ui;

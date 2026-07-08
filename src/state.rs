@@ -34,6 +34,9 @@ pub struct UiState {
     pub equity: f64,
     pub drawdown: f64,
     pub quotes: BTreeMap<String, Quote>,
+    /// Kurshistorikk per symbol som (unix-tid, kurs) — først daglige
+    /// sluttkurser fra oppstart, deretter live-tikk. Brukes av grafen i GUI-et.
+    pub history: BTreeMap<String, VecDeque<(f64, f64)>>,
     pub positions: Vec<Position>,
     pub nordnet_positions: Vec<ExternalPosition>,
     pub nordnet_enabled: bool,
@@ -51,6 +54,7 @@ impl UiState {
             equity: 0.0,
             drawdown: 0.0,
             quotes: BTreeMap::new(),
+            history: BTreeMap::new(),
             positions: Vec::new(),
             nordnet_positions: Vec::new(),
             nordnet_enabled,
@@ -63,6 +67,14 @@ impl UiState {
     pub fn log(&mut self, msg: impl Into<String>) {
         self.logs.push_front((Utc::now(), msg.into()));
         self.logs.truncate(200);
+    }
+
+    pub fn push_price(&mut self, symbol: &str, ts: f64, price: f64) {
+        let h = self.history.entry(symbol.to_string()).or_default();
+        h.push_back((ts, price));
+        if h.len() > 5000 {
+            h.pop_front();
+        }
     }
 
     pub fn push_order(&mut self, order: Order) {
