@@ -58,6 +58,11 @@ pub struct UiState {
     pub strategy_request: Option<String>,
     /// Strategiparametre fra konfigen — brukes av backtesting i GUI-et.
     pub strategy_cfg: StrategyCfg,
+    /// Symboler boten følger. Starter fra konfigen; GUI-et kan legge til
+    /// flere fra markedsskjermene mens appen kjører.
+    pub watchlist: Vec<String>,
+    /// Markedsoversikten (mest omsatte, daytrading, fond, ukesanalyse).
+    pub market: crate::market::MarketOverview,
 }
 
 impl UiState {
@@ -83,6 +88,16 @@ impl UiState {
             strategy_name: String::new(),
             strategy_request: None,
             strategy_cfg: StrategyCfg::default(),
+            watchlist: Vec::new(),
+            market: crate::market::MarketOverview::default(),
+        }
+    }
+
+    /// Legg et symbol til i watchlisten (fra markedsskjermene).
+    pub fn follow(&mut self, symbol: &str) {
+        if !self.watchlist.iter().any(|s| s == symbol) {
+            self.watchlist.push(symbol.to_string());
+            self.log(format!("{symbol} lagt til i watchlisten."));
         }
     }
 

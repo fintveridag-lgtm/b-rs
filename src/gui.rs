@@ -10,15 +10,23 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-const GREEN: Color32 = Color32::from_rgb(34, 197, 94);
-const RED: Color32 = Color32::from_rgb(239, 68, 68);
+// Nordnet-inspirert, nesten svart palett med grønn aksent.
+const GREEN: Color32 = Color32::from_rgb(0, 196, 106);
+const RED: Color32 = Color32::from_rgb(240, 82, 82);
 const YELLOW: Color32 = Color32::from_rgb(250, 204, 21);
 const BLUE: Color32 = Color32::from_rgb(96, 165, 250);
-const GRAY: Color32 = Color32::from_rgb(148, 163, 184);
-const BG_PANEL: Color32 = Color32::from_rgb(13, 22, 38);
-const BG_DEEP: Color32 = Color32::from_rgb(9, 15, 27);
-const BG_CARD: Color32 = Color32::from_rgb(20, 32, 54);
-const BORDER: Color32 = Color32::from_rgb(35, 52, 80);
+const GRAY: Color32 = Color32::from_rgb(140, 150, 165);
+const BG_PANEL: Color32 = Color32::from_rgb(10, 13, 20);
+const BG_DEEP: Color32 = Color32::from_rgb(5, 7, 12);
+const BG_CARD: Color32 = Color32::from_rgb(16, 20, 29);
+const BORDER: Color32 = Color32::from_rgb(30, 38, 51);
+
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Handel,
+    Marked,
+    Analyse,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum ChartStyle {
@@ -61,6 +69,7 @@ pub fn run(state: SharedState, flags: Arc<Flags>) -> Result<()> {
     let app = App {
         state,
         flags: flags.clone(),
+        view: View::Handel,
         selected: None,
         range: ChartRange::ThreeMonths,
         style: ChartStyle::Line,
@@ -113,6 +122,7 @@ fn load_icon() -> Option<egui::IconData> {
 struct App {
     state: SharedState,
     flags: Arc<Flags>,
+    view: View,
     selected: Option<String>,
     range: ChartRange,
     style: ChartStyle,
@@ -136,9 +146,15 @@ impl eframe::App for App {
         }
 
         self.top_bar(ctx, &st);
-        self.left_panel(ctx, &mut st);
-        self.bottom_panel(ctx, &st);
-        self.chart_panel(ctx, &st);
+        match self.view {
+            View::Handel => {
+                self.left_panel(ctx, &mut st);
+                self.bottom_panel(ctx, &st);
+                self.chart_panel(ctx, &st);
+            }
+            View::Marked => self.market_view(ctx, &mut st),
+            View::Analyse => self.analyse_view(ctx, &st),
+        }
     }
 }
 
@@ -202,7 +218,27 @@ impl App {
                 };
                 stat_card(ui, "Strategi", status.0.to_string(), status.1);
             });
-            ui.add_space(6.0);
+
+            // Hovedmeny
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                for (view, label) in [
+                    (View::Handel, "📊  Handel"),
+                    (View::Marked, "🔥  Markedet"),
+                    (View::Analyse, "🔮  Ukens analyse"),
+                ] {
+                    let active = self.view == view;
+                    let text = if active {
+                        RichText::new(label).size(15.0).color(GREEN).strong()
+                    } else {
+                        RichText::new(label).size(15.0).color(GRAY)
+                    };
+                    if ui.selectable_label(active, text).clicked() {
+                        self.view = view;
+                    }
+                }
+            });
+            ui.add_space(4.0);
         });
     }
 
@@ -540,6 +576,168 @@ impl App {
                     plot_ui.line(Line::new(PlotPoints::from(eq_pts)).color(YELLOW).width(1.5).name("Egenkapital"));
                 });
         });
+    }
+}
+
+impl App {
+    fn market_view(&mut self, ctx: &egui::Context, st: &mut UiState) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let mut to_follow: Vec<String> = Vec::new();
+            egui::ScrollArea::vertical().id_salt("marked_scroll").show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.heading(RichText::new("🔥 Markedet").strong());
+                    match st.market.updated {
+                        Some(ts) => {
+                            ui.label(RichText::new(format!("oppdatert {}", ts.format("%H:%M"))).color(GRAY));
+                        }
+                        None => {
+                            ui.spinner();
+                            ui.label(RichText::new("henter markedsdata (kan ta et halvt minutt) …").color(GRAY));
+                        }
+                    }
+                });
+                ui.small("Klikk ➕ for å legge en aksje i watchlisten — da følger boten og grafen den.");
+                ui.add_space(8.0);
+
+                market_table(
+                    ui,
+                    "💰 Dagens mest omsatte",
+                    "De 10 aksjene med høyest omsetning (kurs × volum) på Oslo Børs i dag.",
+                    "mest_omsatte",
+                    &st.market.most_traded,
+                    &mut to_follow,
+                );
+                ui.add_space(14.0);
+                market_table(
+                    ui,
+                    "⚡ Beste for daytrading",
+                    "Størst dagsbevegelse (snitt siste 10 dager) blant de mest likvide — mye svingning å handle på, men også høyere risiko.",
+                    "daytrading",
+                    &st.market.day_trade,
+                    &mut to_follow,
+                );
+                ui.add_space(14.0);
+                market_table(
+                    ui,
+                    "🌍 Populære fond og ETF-er",
+                    "Kuraterte, folkekjære indeksfond (ETF-er med live-kurser). Norske verdipapirfond mangler åpne sanntidskurser.",
+                    "fond",
+                    &st.market.funds,
+                    &mut to_follow,
+                );
+            });
+            for symbol in to_follow {
+                st.follow(&symbol);
+            }
+        });
+    }
+
+    fn analyse_view(&self, ctx: &egui::Context, st: &UiState) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().id_salt("analyse_scroll").show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.heading(RichText::new("🔮 Ukens analyse").strong());
+                    match st.market.updated {
+                        Some(ts) => {
+                            ui.label(RichText::new(format!("oppdatert {}", ts.format("%H:%M"))).color(GRAY));
+                        }
+                        None => {
+                            ui.spinner();
+                            ui.label(RichText::new("analyserer …").color(GRAY));
+                        }
+                    }
+                });
+                ui.small(
+                    "Automatisk teknisk vurdering av uken som kommer, per aksje: trend (SMA 5/20), \
+                     momentum (ukesendring) og RSI. Dette er en enkel maskinvurdering — IKKE investeringsråd.",
+                );
+                ui.add_space(8.0);
+
+                egui::Grid::new("ukesanalyse").striped(true).min_col_width(60.0).show(ui, |ui| {
+                    for h in ["Symbol", "Selskap", "Siste", "Uke", "RSI", "Trend", "Sving/dag", "Vurdering"] {
+                        ui.label(RichText::new(h).strong().color(GRAY));
+                    }
+                    ui.end_row();
+                    for w in &st.market.week {
+                        ui.label(RichText::new(&w.symbol).strong());
+                        ui.label(&w.name);
+                        ui.label(format!("{:.2}", w.last));
+                        let wc = if w.week_pct >= 0.0 { GREEN } else { RED };
+                        ui.label(RichText::new(format!("{:+.1} %", w.week_pct)).color(wc));
+                        let rsi_color = if w.rsi > 70.0 || w.rsi < 30.0 { YELLOW } else { GRAY };
+                        ui.label(RichText::new(format!("{:.0}", w.rsi)).color(rsi_color));
+                        if w.trend_up {
+                            ui.label(RichText::new("↗ opp").color(GREEN));
+                        } else {
+                            ui.label(RichText::new("↘ ned").color(RED));
+                        }
+                        ui.label(format!("{:.1} %", w.range_pct));
+                        let (verdict, color) = verdict_for(w.score);
+                        ui.label(RichText::new(verdict).color(color).strong());
+                        ui.end_row();
+                    }
+                });
+                if st.market.week.is_empty() {
+                    ui.add_space(10.0);
+                    ui.spinner();
+                }
+            });
+        });
+    }
+}
+
+fn verdict_for(score: i32) -> (&'static str, Color32) {
+    match score {
+        s if s >= 2 => ("Positiv 📈", GREEN),
+        s if s <= -2 => ("Svak 📉", RED),
+        _ => ("Nøytral ➖", GRAY),
+    }
+}
+
+fn market_table(
+    ui: &mut egui::Ui,
+    title: &str,
+    subtitle: &str,
+    id: &str,
+    rows: &[crate::market::MarketRow],
+    to_follow: &mut Vec<String>,
+) {
+    section_heading(ui, title);
+    ui.small(subtitle);
+    ui.add_space(4.0);
+    egui::Grid::new(id).striped(true).min_col_width(58.0).show(ui, |ui| {
+        for h in ["", "Symbol", "Navn", "Siste", "I dag", "Uke", "Omsetning", "Sving/dag"] {
+            ui.label(RichText::new(h).strong().color(GRAY));
+        }
+        ui.end_row();
+        for r in rows {
+            if ui.button("➕").on_hover_text("Legg til i watchlisten").clicked() {
+                to_follow.push(r.symbol.clone());
+            }
+            ui.label(RichText::new(&r.symbol).strong());
+            ui.label(&r.name);
+            ui.label(format!("{:.2}", r.last));
+            let dc = if r.day_pct >= 0.0 { GREEN } else { RED };
+            ui.label(RichText::new(format!("{:+.2} %", r.day_pct)).color(dc));
+            let wc = if r.week_pct >= 0.0 { GREEN } else { RED };
+            ui.label(RichText::new(format!("{:+.1} %", r.week_pct)).color(wc));
+            ui.label(fmt_turnover(r.turnover));
+            ui.label(format!("{:.1} %", r.range_pct));
+            ui.end_row();
+        }
+    });
+    if rows.is_empty() {
+        ui.small("Venter på data …");
+    }
+}
+
+fn fmt_turnover(v: f64) -> String {
+    if v >= 1e9 {
+        format!("{:.1} mrd", v / 1e9)
+    } else {
+        format!("{:.0} mill", v / 1e6)
     }
 }
 

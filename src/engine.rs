@@ -8,6 +8,7 @@ use crate::store::Store;
 use crate::strategy::Strategy;
 use crate::types::{OrderRequest, OrderStatus, Side};
 use chrono::Utc;
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +26,8 @@ pub struct Engine {
     flags: Arc<Flags>,
     notifier: Option<Arc<Notifier>>,
     was_killed: bool,
+    /// Symboler som allerede er sådd med historikk.
+    seeded: HashSet<String>,
 }
 
 impl Engine {
@@ -50,6 +53,7 @@ impl Engine {
             flags,
             notifier,
             was_killed: false,
+            seeded: HashSet::new(),
         }
     }
 
@@ -70,9 +74,15 @@ impl Engine {
         self.state.lock().unwrap().log(msg);
     }
 
-    /// Så strategien med daglig historikk så den har SMA-vinduer fra start.
-    pub async fn seed_history(&mut self) {
-        for symbol in self.cfg.watchlist.clone() {
+    /// Så strategien med daglig historikk for alle usådde symboler i
+    /// watchlisten — både ved oppstart og når GUI-et legger til nye.
+    pub async fn ensure_seeded(&mut self) {
+        let symbols: Vec<String> = self.state.lock().unwrap().watchlist.clone();
+        for symbol in symbols {
+            if self.seeded.contains(&symbol) {
+                continue;
+            }
+            self.seeded.insert(symbol.clone());
             match self.market.history_daily(&symbol, "3mo").await {
                 Ok(bars) if !bars.is_empty() => {
                     let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
@@ -106,7 +116,7 @@ impl Engine {
             self.broker.name(),
             self.strategy.name()
         ));
-        self.seed_history().await;
+        self.ensure_seeded().await;
 
         let mut interval = tokio::time::interval(Duration::from_secs(self.cfg.poll_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -162,10 +172,12 @@ impl Engine {
 
     async fn tick(&mut self) {
         self.handle_strategy_switch();
+        self.ensure_seeded().await;
 
         // 1) Hent kurser.
+        let symbols: Vec<String> = self.state.lock().unwrap().watchlist.clone();
         let mut fresh = Vec::new();
-        for symbol in &self.cfg.watchlist {
+        for symbol in &symbols {
             match self.market.quote(symbol).await {
                 Ok(q) => {
                     self.broker.on_quote(symbol, q.last).await;

@@ -46,6 +46,31 @@ impl Yahoo {
         let result = self.chart(symbol, range, "1d").await?;
         parse_history(symbol, &result)
     }
+
+    /// Alt markedsskjermene trenger i ett kall: siste kurs, dagsvolum og
+    /// tre måneder daglig historikk.
+    pub async fn snapshot(&self, symbol: &str) -> Result<Snapshot> {
+        let result = self.chart(symbol, "3mo", "1d").await?;
+        let meta = result
+            .pointer("/meta")
+            .with_context(|| format!("mangler meta for {symbol}"))?;
+        let last = meta
+            .get("regularMarketPrice")
+            .and_then(Value::as_f64)
+            .with_context(|| format!("mangler kurs for {symbol}"))?;
+        let volume = meta
+            .get("regularMarketVolume")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let candles = parse_history(symbol, &result)?;
+        Ok(Snapshot { last, volume, candles })
+    }
+}
+
+pub struct Snapshot {
+    pub last: f64,
+    pub volume: f64,
+    pub candles: Vec<Candle>,
 }
 
 fn parse_quote(symbol: &str, result: &Value) -> Result<Quote> {

@@ -4,6 +4,7 @@ pub mod broker;
 pub mod config;
 pub mod engine;
 pub mod gui;
+pub mod market;
 pub mod marketdata;
 pub mod nordnet;
 pub mod notify;

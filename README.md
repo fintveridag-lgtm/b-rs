@@ -47,6 +47,7 @@ Taster i terminalversjonen: `q` avslutt · `k` kill switch (kanseller + stopp ha
 |---|---|
 | `broker/` | `Broker`-traiten + implementasjoner: `paper` (simulering), `ibkr` (Interactive Brokers Client Portal REST) |
 | `marketdata` | Kurser og historikk fra Yahoo Finance (gratis, ~15 min forsinket; `.OL`-suffiks for Oslo Børs) |
+| `market` | Markedsskjermene: mest omsatte, daytrading-kandidater, fond/ETF-er og teknisk ukesanalyse |
 | `strategy` | `Strategy`-traiten + `sma_cross`, `rsi` og `momentum` — byttes i appen |
 | `backtest` | Kjør en strategi over historikken og sammenlign med kjøp-og-hold |
 | `risk` | Harde grenser: maks ordreverdi, maks posisjon, ratebegrensning, tapsgrense |

@@ -46,6 +46,7 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
         st.sma_windows = (cfg.strategy.fast, cfg.strategy.slow);
         st.strategy_name = cfg.strategy.name.clone();
         st.strategy_cfg = cfg.strategy.clone();
+        st.watchlist = cfg.watchlist.clone();
     }
     let flags = Arc::new(Flags::default());
 
@@ -70,6 +71,9 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
     if cfg.nordnet.enabled {
         rt.spawn(engine::nordnet_task(cfg.clone(), state.clone(), flags.clone()));
     }
+
+    // Markedsoversikten (mest omsatte, daytrading, fond, ukesanalyse).
+    rt.spawn(crate::market::task(state.clone(), flags.clone()));
 
     // UI-et blokkerer hovedtråden til brukeren avslutter.
     let result = if use_tui {
