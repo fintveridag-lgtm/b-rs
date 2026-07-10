@@ -24,8 +24,32 @@ const BORDER: Color32 = Color32::from_rgb(30, 38, 51);
 #[derive(Clone, Copy, PartialEq)]
 enum View {
     Handel,
+    Portefolje,
+    Ordrer,
+    Transaksjoner,
     Marked,
     Analyse,
+    Kalender,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum OrderFilter {
+    Alle,
+    Aktive,
+    Fullforte,
+    Kansellerte,
+}
+
+impl OrderFilter {
+    fn matches(self, status: crate::types::OrderStatus) -> bool {
+        use crate::types::OrderStatus::*;
+        match self {
+            OrderFilter::Alle => true,
+            OrderFilter::Aktive => status == Submitted,
+            OrderFilter::Fullforte => status == Filled,
+            OrderFilter::Kansellerte => matches!(status, Cancelled | Rejected),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -76,6 +100,7 @@ pub fn run(state: SharedState, flags: Arc<Flags>) -> Result<()> {
         trade_qty: 10.0,
         strategy_choice: String::new(),
         backtest: None,
+        order_filter: OrderFilter::Alle,
     };
     let result = eframe::run_native(
         "b-rs",
@@ -129,6 +154,7 @@ struct App {
     trade_qty: f64,
     strategy_choice: String,
     backtest: Option<std::result::Result<BacktestResult, String>>,
+    order_filter: OrderFilter,
 }
 
 impl eframe::App for App {
@@ -152,8 +178,12 @@ impl eframe::App for App {
                 self.bottom_panel(ctx, &st);
                 self.chart_panel(ctx, &st);
             }
+            View::Portefolje => self.portfolio_view(ctx, &st),
+            View::Ordrer => self.orders_view(ctx, &st),
+            View::Transaksjoner => self.transactions_view(ctx, &st),
             View::Marked => self.market_view(ctx, &mut st),
             View::Analyse => self.analyse_view(ctx, &st),
+            View::Kalender => self.calendar_view(ctx, &st),
         }
     }
 }
@@ -223,9 +253,13 @@ impl App {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 for (view, label) in [
-                    (View::Handel, "📊  Handel"),
-                    (View::Marked, "🔥  Markedet"),
-                    (View::Analyse, "🔮  Ukens analyse"),
+                    (View::Handel, "📊 Handel"),
+                    (View::Portefolje, "💼 Portefølje"),
+                    (View::Ordrer, "🧾 Ordrer"),
+                    (View::Transaksjoner, "💳 Transaksjoner"),
+                    (View::Marked, "🔥 Markedet"),
+                    (View::Analyse, "🔮 Uken"),
+                    (View::Kalender, "📅 Kalender"),
                 ] {
                     let active = self.view == view;
                     let text = if active {
@@ -580,6 +614,264 @@ impl App {
 }
 
 impl App {
+    fn portfolio_view(&self, ctx: &egui::Context, st: &UiState) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().id_salt("portefolje_scroll").show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.heading(RichText::new("💼 Min portefølje").strong());
+                ui.add_space(8.0);
+
+                // Dagens utvikling: sum av qty × (siste − forrige slutt).
+                let day_kr: f64 = st
+                    .positions
+                    .iter()
+                    .filter_map(|p| st.quotes.get(&p.symbol).map(|q| p.qty * (q.last - q.prev_close)))
+                    .sum();
+                let day_pct = if st.equity - day_kr > 0.0 {
+                    day_kr / (st.equity - day_kr) * 100.0
+                } else {
+                    0.0
+                };
+                let total_kr = st.equity - st.start_cash;
+                let total_pct = if st.start_cash > 0.0 { total_kr / st.start_cash * 100.0 } else { 0.0 };
+
+                // Kontooversikt
+                section_heading(ui, "🏦 Kontoer");
+                ui.horizontal(|ui| {
+                    account_card(ui, &format!("Papirkonto ({})", st.broker_name), &[
+                        ("Egenkapital", format!("{} kr", fmt_thousands(st.equity)), Color32::WHITE),
+                        ("Kontanter", format!("{} kr", fmt_thousands(st.cash)), GRAY),
+                        ("I dag", format!("{}{} kr ({:+.2} %)", plus(day_kr), fmt_thousands(day_kr), day_pct), updown(day_kr)),
+                        ("Total avkastning", format!("{}{} kr ({:+.2} %)", plus(total_kr), fmt_thousands(total_kr), total_pct), updown(total_kr)),
+                    ]);
+                    if st.nordnet_enabled {
+                        let nn_value: f64 = st.nordnet_positions.iter().map(|p| p.market_value).sum();
+                        account_card(ui, "Nordnet (lesemodus)", &[
+                            ("Verdi", format!("{} kr", fmt_thousands(nn_value)), Color32::WHITE),
+                            ("Posisjoner", format!("{}", st.nordnet_positions.len()), GRAY),
+                            ("", "Kun lesing — handles ikke".into(), BLUE),
+                        ]);
+                    }
+                });
+
+                // Utviklingsgraf
+                ui.add_space(14.0);
+                section_heading(ui, "📈 Utvikling denne økten");
+                let eq_pts: Vec<[f64; 2]> = st.equity_history.iter().map(|&(t, v)| [t, v]).collect();
+                Plot::new("portefolje_equity")
+                    .height(200.0)
+                    .x_axis_formatter(|mark, _range| {
+                        chrono::DateTime::from_timestamp(mark.value as i64, 0)
+                            .map(|dt| dt.format("%H:%M").to_string())
+                            .unwrap_or_default()
+                    })
+                    .show(ui, |plot_ui| {
+                        plot_ui.line(Line::new(PlotPoints::from(eq_pts)).color(GREEN).width(2.0).name("Egenkapital"));
+                    });
+
+                // Beholdning
+                ui.add_space(14.0);
+                section_heading(ui, "💼 Beholdning");
+                if st.positions.is_empty() {
+                    ui.small("Ingen posisjoner ennå — boten (eller du, via Hurtighandel) har ikke kjøpt noe.");
+                } else {
+                    let invested: f64 = st.positions.iter().map(|p| p.market_value()).sum();
+                    egui::Grid::new("beholdning").striped(true).min_col_width(60.0).show(ui, |ui| {
+                        for h in ["Symbol", "Antall", "Snitt", "Siste", "Verdi", "Urealisert", "I dag", "Utbytte 12m", "Andel"] {
+                            ui.label(RichText::new(h).strong().color(GRAY));
+                        }
+                        ui.end_row();
+                        for p in &st.positions {
+                            ui.label(RichText::new(&p.symbol).strong());
+                            ui.label(format!("{:.0}", p.qty));
+                            ui.label(format!("{:.2}", p.avg_price));
+                            ui.label(format!("{:.2}", p.last));
+                            ui.label(fmt_thousands(p.market_value()));
+                            let u = p.unrealized();
+                            let u_pct = if p.avg_price > 0.0 { (p.last / p.avg_price - 1.0) * 100.0 } else { 0.0 };
+                            ui.label(RichText::new(format!("{u:+.0} kr ({u_pct:+.1} %)")).color(updown(u)));
+                            match st.quotes.get(&p.symbol) {
+                                Some(q) => {
+                                    let d = p.qty * (q.last - q.prev_close);
+                                    ui.label(RichText::new(format!("{d:+.0} kr")).color(updown(d)));
+                                }
+                                None => { ui.label("–"); }
+                            }
+                            match st.dividends.get(&p.symbol) {
+                                Some(&div) if div > 0.0 => {
+                                    ui.label(RichText::new(format!("{:.0} kr", div * p.qty)).color(YELLOW));
+                                }
+                                _ => { ui.label("–"); }
+                            }
+                            let share = if invested > 0.0 { p.market_value() / invested * 100.0 } else { 0.0 };
+                            ui.label(format!("{share:.1} %"));
+                            ui.end_row();
+                        }
+                    });
+
+                    // Forventet utbytte samlet (basert på siste 12 mnd per aksje).
+                    let total_div: f64 = st
+                        .positions
+                        .iter()
+                        .filter_map(|p| st.dividends.get(&p.symbol).map(|d| d * p.qty))
+                        .sum();
+                    if total_div > 0.0 {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "💰 Utbytte: beholdningen din betalte {} kr siste 12 mnd (indikasjon på årlig utbytteinntekt).",
+                                fmt_thousands(total_div)
+                            ))
+                            .color(YELLOW),
+                        );
+                    }
+
+                    // Fordeling
+                    ui.add_space(14.0);
+                    section_heading(ui, "🥧 Fordeling");
+                    let total = invested + st.cash;
+                    for p in &st.positions {
+                        let frac = if total > 0.0 { p.market_value() / total } else { 0.0 };
+                        ui.add(
+                            egui::ProgressBar::new(frac as f32)
+                                .text(format!("{}  {:.1} %  ({} kr)", p.symbol, frac * 100.0, fmt_thousands(p.market_value()))),
+                        );
+                    }
+                    let cash_frac = if total > 0.0 { st.cash / total } else { 0.0 };
+                    ui.add(
+                        egui::ProgressBar::new(cash_frac as f32)
+                            .text(format!("Kontanter  {:.1} %  ({} kr)", cash_frac * 100.0, fmt_thousands(st.cash))),
+                    );
+                }
+            });
+        });
+    }
+
+    fn orders_view(&mut self, ctx: &egui::Context, st: &UiState) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.heading(RichText::new("🧾 Ordrer").strong());
+            ui.small("Ordrene fra denne økten. Full historikk ligger under 💳 Transaksjoner.");
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let count = |f: OrderFilter| st.orders.iter().filter(|o| f.matches(o.status)).count();
+                ui.selectable_value(&mut self.order_filter, OrderFilter::Alle, format!("Alle ({})", st.orders.len()));
+                ui.selectable_value(&mut self.order_filter, OrderFilter::Aktive, format!("Aktive ({})", count(OrderFilter::Aktive)));
+                ui.selectable_value(&mut self.order_filter, OrderFilter::Fullforte, format!("Fullførte ({})", count(OrderFilter::Fullforte)));
+                ui.selectable_value(&mut self.order_filter, OrderFilter::Kansellerte, format!("Kansellerte/avviste ({})", count(OrderFilter::Kansellerte)));
+            });
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().id_salt("ordrer_view").show(ui, |ui| {
+                egui::Grid::new("ordrer_full").striped(true).min_col_width(60.0).show(ui, |ui| {
+                    for h in ["Tid", "Id", "Side", "Symbol", "Antall", "Kurs", "Status", "Merknad"] {
+                        ui.label(RichText::new(h).strong().color(GRAY));
+                    }
+                    ui.end_row();
+                    for o in st.orders.iter().filter(|o| self.order_filter.matches(o.status)) {
+                        ui.label(o.created.format("%H:%M:%S").to_string());
+                        ui.label(&o.id);
+                        let color = match o.side { Side::Buy => GREEN, Side::Sell => RED };
+                        ui.label(RichText::new(o.side.to_string()).color(color).strong());
+                        ui.label(&o.symbol);
+                        ui.label(format!("{:.0}", o.qty));
+                        ui.label(format!("{:.2}", o.avg_price));
+                        ui.label(o.status.to_string());
+                        ui.label(RichText::new(&o.note).small().color(GRAY));
+                        ui.end_row();
+                    }
+                });
+                if st.orders.iter().filter(|o| self.order_filter.matches(o.status)).count() == 0 {
+                    ui.add_space(8.0);
+                    ui.small("Ingen ordrer i denne kategorien ennå.");
+                }
+            });
+        });
+    }
+
+    fn transactions_view(&self, ctx: &egui::Context, st: &UiState) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.heading(RichText::new("💳 Transaksjoner").strong());
+            ui.small(format!(
+                "Komplett historikk fra databasen ({} transaksjoner) — også fra tidligere økter.",
+                st.transactions.len()
+            ));
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().id_salt("tx_view").show(ui, |ui| {
+                egui::Grid::new("tx_grid").striped(true).min_col_width(60.0).show(ui, |ui| {
+                    for h in ["Tidspunkt", "Side", "Symbol", "Antall", "Kurs", "Beløp", "Status", "Megler", "Merknad"] {
+                        ui.label(RichText::new(h).strong().color(GRAY));
+                    }
+                    ui.end_row();
+                    for t in &st.transactions {
+                        ui.label(&t.ts);
+                        let color = if t.side == "KJØP" { GREEN } else { RED };
+                        ui.label(RichText::new(&t.side).color(color).strong());
+                        ui.label(&t.symbol);
+                        ui.label(format!("{:.0}", t.qty));
+                        ui.label(format!("{:.2}", t.price));
+                        ui.label(fmt_thousands(t.qty * t.price));
+                        ui.label(&t.status);
+                        ui.label(RichText::new(&t.broker).color(GRAY));
+                        ui.label(RichText::new(&t.note).small().color(GRAY));
+                        ui.end_row();
+                    }
+                });
+                if st.transactions.is_empty() {
+                    ui.add_space(8.0);
+                    ui.small("Ingen transaksjoner ennå.");
+                }
+            });
+        });
+    }
+
+    fn calendar_view(&self, ctx: &egui::Context, st: &UiState) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.heading(RichText::new("📅 Selskapskalender").strong());
+            ui.small(
+                "Kommende kvartalsrapporter og utbyttedatoer for de 25 største Oslo Børs-selskapene. \
+                 Datoene er Yahoos estimater og kan endres av selskapene.",
+            );
+            ui.add_space(6.0);
+            if let Some(note) = &st.calendar_note {
+                ui.label(RichText::new(note).color(YELLOW));
+            }
+            if st.calendar.is_empty() && st.calendar_note.is_none() {
+                ui.spinner();
+                ui.small("Henter kalenderdata …");
+            }
+            egui::ScrollArea::vertical().id_salt("kalender_view").show(ui, |ui| {
+                egui::Grid::new("kalender_grid").striped(true).min_col_width(80.0).show(ui, |ui| {
+                    for h in ["Dato", "Om", "Symbol", "Selskap", "Hendelse"] {
+                        ui.label(RichText::new(h).strong().color(GRAY));
+                    }
+                    ui.end_row();
+                    let now = chrono::Utc::now();
+                    for e in &st.calendar {
+                        ui.label(RichText::new(e.date.format("%d.%m.%Y").to_string()).strong());
+                        let days = (e.date - now).num_days();
+                        let om = match days {
+                            d if d <= 0 => "i dag".to_string(),
+                            1 => "i morgen".to_string(),
+                            d => format!("om {d} dager"),
+                        };
+                        ui.label(RichText::new(om).color(if days <= 7 { YELLOW } else { GRAY }));
+                        ui.label(&e.symbol);
+                        ui.label(&e.name);
+                        let color = match e.kind {
+                            "Kvartalsrapport" => BLUE,
+                            "Eks-utbytte" => YELLOW,
+                            _ => GREEN,
+                        };
+                        ui.label(RichText::new(e.kind).color(color).strong());
+                        ui.end_row();
+                    }
+                });
+            });
+        });
+    }
+
     fn market_view(&mut self, ctx: &egui::Context, st: &mut UiState) {
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut to_follow: Vec<String> = Vec::new();
@@ -731,6 +1023,38 @@ fn market_table(
     if rows.is_empty() {
         ui.small("Venter på data …");
     }
+}
+
+fn plus(v: f64) -> &'static str {
+    if v >= 0.0 { "+" } else { "" }
+}
+
+fn updown(v: f64) -> Color32 {
+    if v >= 0.0 { GREEN } else { RED }
+}
+
+/// Kontokort med tittel og rader av (etikett, verdi, farge).
+fn account_card(ui: &mut egui::Ui, title: &str, rows: &[(&str, String, Color32)]) {
+    egui::Frame::group(ui.style())
+        .fill(BG_CARD)
+        .stroke(egui::Stroke::new(1.0, BORDER))
+        .inner_margin(egui::Margin::symmetric(16.0, 12.0))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(title).strong().size(15.0));
+                ui.add_space(4.0);
+                for (label, value, color) in rows {
+                    ui.horizontal(|ui| {
+                        if !label.is_empty() {
+                            ui.label(RichText::new(*label).small().color(GRAY));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(value).color(*color).strong());
+                        });
+                    });
+                }
+            });
+        });
 }
 
 fn fmt_turnover(v: f64) -> String {

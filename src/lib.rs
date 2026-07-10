@@ -1,6 +1,7 @@
 pub mod app;
 pub mod backtest;
 pub mod broker;
+pub mod calendar;
 pub mod config;
 pub mod engine;
 pub mod gui;

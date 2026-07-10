@@ -95,6 +95,12 @@ impl Engine {
                         st.candles.insert(symbol.clone(), bars.clone());
                     }
                     self.log(format!("{symbol}: sådd med {} dagers historikk", bars.len()));
+                    // Utbytte siste 12 mnd — vises i porteføljeanalysen.
+                    if let Ok(div) = self.market.dividends_12m(&symbol).await {
+                        if div > 0.0 {
+                            self.state.lock().unwrap().dividends.insert(symbol.clone(), div);
+                        }
+                    }
                 }
                 Ok(_) => self.log(format!("{symbol}: tom historikk fra Yahoo")),
                 Err(e) => self.log(format!("{symbol}: klarte ikke hente historikk: {e:#}")),
@@ -316,7 +322,19 @@ impl Engine {
                     ));
                 }
                 let _ = self.store.record_order(&order, self.broker.name());
-                self.state.lock().unwrap().push_order(order);
+                let tx = crate::state::TxRow {
+                    ts: order.created.format("%d.%m.%Y %H:%M").to_string(),
+                    symbol: order.symbol.clone(),
+                    side: order.side.to_string(),
+                    qty: order.qty,
+                    price: order.avg_price,
+                    status: order.status.to_string(),
+                    broker: self.broker.name().to_string(),
+                    note: order.note.clone(),
+                };
+                let mut st = self.state.lock().unwrap();
+                st.push_transaction(tx);
+                st.push_order(order);
             }
             Err(e) => self.log(format!("Ordre feilet for {symbol}: {e:#}")),
         }

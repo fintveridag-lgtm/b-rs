@@ -1,3 +1,4 @@
+use crate::state::TxRow;
 use crate::types::Order;
 use anyhow::Result;
 use rusqlite::{params, Connection};
@@ -59,5 +60,61 @@ impl Store {
             params![chrono::Utc::now().to_rfc3339(), message],
         )?;
         Ok(())
+    }
+
+    /// Hele transaksjonshistorikken (nyeste først) — også fra tidligere økter.
+    pub fn recent_orders(&self, limit: usize) -> Result<Vec<TxRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT ts, symbol, side, qty, price, status, broker, note
+             FROM orders ORDER BY ts DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            Ok(TxRow {
+                ts: format_ts(&r.get::<_, String>(0)?),
+                symbol: r.get(1)?,
+                side: r.get(2)?,
+                qty: r.get(3)?,
+                price: r.get(4)?,
+                status: r.get(5)?,
+                broker: r.get(6)?,
+                note: r.get(7)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+}
+
+fn format_ts(raw: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|d| d.format("%d.%m.%Y %H:%M").to_string())
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{OrderStatus, Side};
+    use chrono::Utc;
+
+    #[test]
+    fn records_and_reads_back_orders() {
+        let store = Store::open(":memory:").unwrap();
+        let order = Order {
+            id: "T1".into(),
+            symbol: "EQNR.OL".into(),
+            side: Side::Buy,
+            qty: 10.0,
+            status: OrderStatus::Filled,
+            avg_price: 342.5,
+            created: Utc::now(),
+            note: "test".into(),
+        };
+        store.record_order(&order, "paper").unwrap();
+        let txs = store.recent_orders(10).unwrap();
+        assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].symbol, "EQNR.OL");
+        assert_eq!(txs[0].side, "KJØP");
+        assert_eq!(txs[0].broker, "paper");
     }
 }

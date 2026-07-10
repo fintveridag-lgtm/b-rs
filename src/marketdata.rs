@@ -73,6 +73,34 @@ pub struct Snapshot {
     pub candles: Vec<Candle>,
 }
 
+impl Yahoo {
+    /// Sum utbytte per aksje siste 12 måneder (0.0 hvis ingen).
+    pub async fn dividends_12m(&self, symbol: &str) -> Result<f64> {
+        let url = format!(
+            "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1y&interval=1d&events=div"
+        );
+        let resp = self.client.get(&url).send().await?.error_for_status()?;
+        let v: Value = resp.json().await?;
+        let result = v
+            .pointer("/chart/result/0")
+            .cloned()
+            .with_context(|| format!("tomt utbyttesvar for {symbol}"))?;
+        Ok(parse_dividends(&result))
+    }
+}
+
+fn parse_dividends(result: &Value) -> f64 {
+    result
+        .pointer("/events/dividends")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.values()
+                .filter_map(|d| d.get("amount").and_then(Value::as_f64))
+                .sum()
+        })
+        .unwrap_or(0.0)
+}
+
 fn parse_quote(symbol: &str, result: &Value) -> Result<Quote> {
     let meta = result
         .pointer("/meta")
@@ -167,5 +195,17 @@ mod tests {
     fn missing_price_is_an_error() {
         let result = json!({ "meta": {} });
         assert!(parse_quote("X", &result).is_err());
+    }
+
+    #[test]
+    fn sums_dividends() {
+        let result = json!({
+            "events": { "dividends": {
+                "1710000000": { "amount": 3.5, "date": 1710000000 },
+                "1720000000": { "amount": 4.0, "date": 1720000000 }
+            } }
+        });
+        assert!((parse_dividends(&result) - 7.5).abs() < 1e-9);
+        assert_eq!(parse_dividends(&json!({})), 0.0);
     }
 }

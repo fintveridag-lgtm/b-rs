@@ -63,6 +63,29 @@ pub struct UiState {
     pub watchlist: Vec<String>,
     /// Markedsoversikten (mest omsatte, daytrading, fond, ukesanalyse).
     pub market: crate::market::MarketOverview,
+    /// Startkapital — grunnlag for total avkastning.
+    pub start_cash: f64,
+    /// Utbytte per aksje siste 12 mnd, per symbol (fra Yahoo).
+    pub dividends: BTreeMap<String, f64>,
+    /// Komplett ordrehistorikk fra databasen (nyeste først).
+    pub transactions: Vec<TxRow>,
+    /// Kommende selskapshendelser (rapporter, utbyttedatoer).
+    pub calendar: Vec<crate::calendar::CalendarEvent>,
+    /// Feilmelding hvis kalenderdata ikke kunne hentes.
+    pub calendar_note: Option<String>,
+}
+
+/// Én rad i transaksjonshistorikken — display-klar.
+#[derive(Debug, Clone)]
+pub struct TxRow {
+    pub ts: String,
+    pub symbol: String,
+    pub side: String,
+    pub qty: f64,
+    pub price: f64,
+    pub status: String,
+    pub broker: String,
+    pub note: String,
 }
 
 impl UiState {
@@ -90,7 +113,17 @@ impl UiState {
             strategy_cfg: StrategyCfg::default(),
             watchlist: Vec::new(),
             market: crate::market::MarketOverview::default(),
+            start_cash: 0.0,
+            dividends: BTreeMap::new(),
+            transactions: Vec::new(),
+            calendar: Vec::new(),
+            calendar_note: None,
         }
+    }
+
+    pub fn push_transaction(&mut self, tx: TxRow) {
+        self.transactions.insert(0, tx);
+        self.transactions.truncate(1000);
     }
 
     /// Legg et symbol til i watchlisten (fra markedsskjermene).

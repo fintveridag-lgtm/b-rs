@@ -47,6 +47,9 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
         st.strategy_name = cfg.strategy.name.clone();
         st.strategy_cfg = cfg.strategy.clone();
         st.watchlist = cfg.watchlist.clone();
+        st.start_cash = cfg.starting_cash;
+        // Transaksjonshistorikk fra tidligere økter.
+        st.transactions = store.recent_orders(500).unwrap_or_default();
     }
     let flags = Arc::new(Flags::default());
 
@@ -74,6 +77,9 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
 
     // Markedsoversikten (mest omsatte, daytrading, fond, ukesanalyse).
     rt.spawn(crate::market::task(state.clone(), flags.clone()));
+
+    // Selskapskalenderen (rapporter og utbyttedatoer).
+    rt.spawn(crate::calendar::task(state.clone(), flags.clone()));
 
     // UI-et blokkerer hovedtråden til brukeren avslutter.
     let result = if use_tui {
