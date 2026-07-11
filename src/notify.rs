@@ -8,7 +8,8 @@ use serde_json::json;
 ///   1. Installer «ntfy»-appen (App Store / Google Play)
 ///   2. Abonner på et selvvalgt, hemmelig emne, f.eks. "bors-ola-73xk1"
 ///   3. Sett samme navn i `notify.ntfy_topic` i config.toml
-///   Emnenavnet er eneste «passord» — velg noe ugjettelig.
+///
+/// Emnenavnet er eneste «passord» — velg noe ugjettelig.
 ///
 /// **Telegram**:
 ///   1. Snakk med @BotFather i Telegram → /newbot → få bot-token

@@ -123,6 +123,7 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
 ///   2. config.toml i arbeidsmappen
 ///   3. config.toml / config.example.toml ved siden av programfilen
 ///   4. innebygd standardkonfig (papirhandel)
+///
 /// Punkt 3 og 4 gjør at programfilen kan dobbeltklikkes hvor som helst.
 pub fn load_config(config_arg: Option<String>) -> Result<Config> {
     if let Some(arg) = config_arg {

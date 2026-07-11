@@ -14,8 +14,8 @@ use serde_json::{json, Value};
 /// Oppsett:
 ///   1. Lag et Ed25519-nøkkelpar og registrer offentlig nøkkel i
 ///      Revolut X → Settings → API keys:
-///        openssl genpkey -algorithm ed25519 -out revolutx.pem
-///        openssl pkey -in revolutx.pem -pubout
+///      `openssl genpkey -algorithm ed25519 -out revolutx.pem`
+///      og `openssl pkey -in revolutx.pem -pubout`
 ///   2. Sett API-nøkkelen du får i miljøvariabelen REVOLUTX_API_KEY,
 ///      og stien til revolutx.pem i konfigens [revolutx].private_key_path.
 ///   3. Bruk kryptosymboler i watchlisten, f.eks. "BTC-USD", "ETH-USD" —

@@ -34,6 +34,9 @@ pub struct Engine {
 }
 
 impl Engine {
+    // Mange samarbeidspartnere er selve poenget med motoren — en
+    // config-struct ville bare flyttet listen.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cfg: Config,
         broker: Arc<dyn Broker>,
