@@ -1,4 +1,4 @@
-use crate::config::StrategyCfg;
+use crate::config::{BacktestCfg, StrategyCfg};
 use crate::types::{Candle, ExternalPosition, Order, Position, Quote, Side};
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, VecDeque};
@@ -58,6 +58,8 @@ pub struct UiState {
     pub strategy_request: Option<String>,
     /// Strategiparametre fra konfigen — brukes av backtesting i GUI-et.
     pub strategy_cfg: StrategyCfg,
+    /// Kostnadsmodell for backtesting (kurtasje, glidning).
+    pub backtest_cfg: BacktestCfg,
     /// Symboler boten følger. Starter fra konfigen; GUI-et kan legge til
     /// flere fra markedsskjermene mens appen kjører.
     pub watchlist: Vec<String>,
@@ -111,6 +113,7 @@ impl UiState {
             strategy_name: String::new(),
             strategy_request: None,
             strategy_cfg: StrategyCfg::default(),
+            backtest_cfg: BacktestCfg::default(),
             watchlist: Vec::new(),
             market: crate::market::MarketOverview::default(),
             start_cash: 0.0,

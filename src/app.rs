@@ -57,6 +57,7 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
         st.sma_windows = (cfg.strategy.fast, cfg.strategy.slow);
         st.strategy_name = cfg.strategy.name.clone();
         st.strategy_cfg = cfg.strategy.clone();
+        st.backtest_cfg = cfg.backtest.clone();
         st.watchlist = cfg.watchlist.clone();
         st.start_cash = cfg.starting_cash;
         // Transaksjonshistorikk fra tidligere økter.

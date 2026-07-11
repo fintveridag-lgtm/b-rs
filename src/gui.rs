@@ -63,6 +63,7 @@ enum ChartRange {
     Week,
     Month,
     ThreeMonths,
+    Year,
     All,
 }
 
@@ -72,6 +73,7 @@ impl ChartRange {
             ChartRange::Week => Some(7.0 * 86400.0),
             ChartRange::Month => Some(30.0 * 86400.0),
             ChartRange::ThreeMonths => Some(92.0 * 86400.0),
+            ChartRange::Year => Some(365.0 * 86400.0),
             ChartRange::All => None,
         }
     }
@@ -114,21 +116,69 @@ pub fn run(state: SharedState, flags: Arc<Flags>) -> Result<()> {
     result.map_err(|e| anyhow::anyhow!("klarte ikke starte GUI: {e}"))
 }
 
-/// Mørkt tema i samme farger som logoen: dyp navy med grønne aksenter.
+/// Mørkt, moderne tema i samme farger som logoen: nesten svart med grønn
+/// aksent, myke hjørner og diskret grønn glød på interaktive elementer.
 fn apply_theme(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = BG_PANEL;
     visuals.window_fill = BG_PANEL;
     visuals.extreme_bg_color = BG_DEEP;
     visuals.faint_bg_color = BG_CARD;
+    visuals.selection.bg_fill = Color32::from_rgb(14, 92, 53);
+    visuals.hyperlink_color = GREEN;
+
+    // Myke hjørner overalt.
+    let rounding = egui::Rounding::same(8.0);
+    for w in [
+        &mut visuals.widgets.noninteractive,
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
+    ] {
+        w.rounding = rounding;
+    }
+    visuals.window_rounding = egui::Rounding::same(12.0);
     visuals.widgets.noninteractive.bg_stroke.color = BORDER;
-    visuals.selection.bg_fill = Color32::from_rgb(17, 94, 51);
+    // Grønn glød ved hover/klikk.
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, GREEN);
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(22, 30, 42);
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.2, GREEN);
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    style.spacing.button_padding = egui::vec2(10.0, 6.0);
+    style.spacing.button_padding = egui::vec2(12.0, 7.0);
     ctx.set_style(style);
+}
+
+/// Diskret skygge som løfter kortene fra bakgrunnen.
+fn card_shadow() -> egui::epaint::Shadow {
+    egui::epaint::Shadow {
+        offset: egui::vec2(0.0, 2.0),
+        blur: 10.0,
+        spread: 0.0,
+        color: Color32::from_black_alpha(120),
+    }
+}
+
+/// Mini-graf (sparkline) uten akser — kursutviklingen i én liten strek.
+fn sparkline(ui: &mut egui::Ui, id: &str, points: Vec<[f64; 2]>, color: Color32) {
+    Plot::new(id.to_string())
+        .height(20.0)
+        .width(72.0)
+        .show_axes(false)
+        .show_grid(false)
+        .show_background(false)
+        .allow_drag(false)
+        .allow_zoom(false)
+        .allow_scroll(false)
+        .allow_boxed_zoom(false)
+        .show_x(false)
+        .show_y(false)
+        .show(ui, |plot_ui| {
+            plot_ui.line(Line::new(PlotPoints::from(points)).color(color).width(1.5));
+        });
 }
 
 /// Samme logo som bygges inn i .exe-filen brukes som vindusikon.
@@ -285,10 +335,11 @@ impl App {
                 section_heading(ui, "📋 Watchlist");
                 ui.small("Klikk på et symbol for å vise grafen.");
                 ui.add_space(4.0);
-                egui::Grid::new("watchlist").striped(true).min_col_width(72.0).show(ui, |ui| {
+                egui::Grid::new("watchlist").striped(true).min_col_width(64.0).show(ui, |ui| {
                     ui.label(RichText::new("Symbol").strong().color(GRAY));
                     ui.label(RichText::new("Siste").strong().color(GRAY));
                     ui.label(RichText::new("Endring").strong().color(GRAY));
+                    ui.label(RichText::new("30 dager").strong().color(GRAY));
                     ui.end_row();
                     for q in st.quotes.values() {
                         let selected = self.selected.as_deref() == Some(q.symbol.as_str());
@@ -298,7 +349,27 @@ impl App {
                         ui.label(format!("{:.2}", q.last));
                         let pct = q.change_pct();
                         let color = if pct >= 0.0 { GREEN } else { RED };
-                        ui.label(RichText::new(format!("{pct:+.2} %")).color(color));
+                        let arrow = if pct >= 0.0 { "▲" } else { "▼" };
+                        ui.label(RichText::new(format!("{arrow} {pct:+.2} %")).color(color));
+                        // Sparkline: siste ~30 punkter, farget etter trenden.
+                        let points: Vec<[f64; 2]> = st
+                            .history
+                            .get(&q.symbol)
+                            .map(|h| {
+                                h.iter()
+                                    .rev()
+                                    .take(30)
+                                    .rev()
+                                    .map(|&(t, p)| [t, p])
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let trend = match (points.first(), points.last()) {
+                            (Some(a), Some(b)) if b[1] >= a[1] => GREEN,
+                            (Some(_), Some(_)) => RED,
+                            _ => GRAY,
+                        };
+                        sparkline(ui, &format!("spark_{}", q.symbol), points, trend);
                         ui.end_row();
                     }
                 });
@@ -325,7 +396,7 @@ impl App {
                         st.strategy_request = Some(self.strategy_choice.clone());
                     }
                 });
-                if ui.button("🧪 Backtest på valgt symbol (3 mnd)").clicked() {
+                if ui.button("🧪 Backtest på valgt symbol (2 år)").clicked() {
                     self.backtest = Some(run_backtest(self.selected.as_deref(), &self.strategy_choice, st));
                 }
                 match &self.backtest {
@@ -334,26 +405,52 @@ impl App {
                             RichText::new(format!("{} på {}", r.strategy, r.symbol)).strong(),
                         );
                         let color = if r.return_pct >= 0.0 { GREEN } else { RED };
-                        ui.label(RichText::new(format!("Avkastning: {:+.1} %", r.return_pct)).color(color).strong());
+                        ui.label(RichText::new(format!("Avkastning: {:+.1} %", r.return_pct)).color(color).strong().size(17.0));
                         let bh_color = if r.buy_hold_pct >= 0.0 { GREEN } else { RED };
                         ui.horizontal(|ui| {
                             ui.label("Kjøp-og-hold:");
                             ui.label(RichText::new(format!("{:+.1} %", r.buy_hold_pct)).color(bh_color));
                         });
+                        ui.horizontal(|ui| {
+                            ui.label("Verste fall:");
+                            ui.label(RichText::new(format!("{:.1} %", r.max_drawdown_pct)).color(RED));
+                        });
                         let wins = r.wins();
                         ui.label(format!(
-                            "{} handler, {} med gevinst{}",
+                            "{} handler, {} med gevinst{} — kostnader: {:.0} kr",
                             r.trades.len(),
                             wins,
-                            if r.open_entry.is_some() { " (én fortsatt åpen)" } else { "" }
+                            if r.open_entry.is_some() { " (én fortsatt åpen)" } else { "" },
+                            r.costs_paid,
                         ));
-                        ui.small("Forenklet: uten kurtasje og glidning.");
+                        // Resultatkurve i miniatyr.
+                        let curve: Vec<[f64; 2]> = r.equity_curve.clone();
+                        if curve.len() > 1 {
+                            let min_y = curve.iter().map(|p| p[1]).fold(f64::MAX, f64::min);
+                            Plot::new("backtest_kurve")
+                                .height(80.0)
+                                .show_axes(false)
+                                .show_grid(false)
+                                .allow_drag(false)
+                                .allow_zoom(false)
+                                .allow_scroll(false)
+                                .allow_boxed_zoom(false)
+                                .show(ui, |plot_ui| {
+                                    plot_ui.line(
+                                        Line::new(PlotPoints::from(curve))
+                                            .color(color)
+                                            .width(1.5)
+                                            .fill(min_y as f32),
+                                    );
+                                });
+                        }
+                        ui.small("Inkluderer kurtasje og glidning (justeres i [backtest]-konfig).");
                     }
                     Some(Err(e)) => {
                         ui.label(RichText::new(e).color(RED).small());
                     }
                     None => {
-                        ui.small("Test strategien på historikken før du lar den handle.");
+                        ui.small("Test strategien på 2 års historikk før du lar den handle.");
                     }
                 }
 
@@ -496,6 +593,7 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.selectable_value(&mut self.range, ChartRange::All, "Alt");
+                    ui.selectable_value(&mut self.range, ChartRange::Year, "1 år");
                     ui.selectable_value(&mut self.range, ChartRange::ThreeMonths, "3 mnd");
                     ui.selectable_value(&mut self.range, ChartRange::Month, "1 mnd");
                     ui.selectable_value(&mut self.range, ChartRange::Week, "1 uke");
@@ -551,7 +649,14 @@ impl App {
                 .show(ui, |plot_ui| {
                     match self.style {
                         ChartStyle::Line => {
-                            plot_ui.line(Line::new(PlotPoints::from(price_pts)).color(GREEN).width(2.0).name("Kurs"));
+                            let min_y = price_pts.iter().map(|p| p[1]).fold(f64::MAX, f64::min);
+                            plot_ui.line(
+                                Line::new(PlotPoints::from(price_pts))
+                                    .color(GREEN)
+                                    .width(2.0)
+                                    .fill(min_y as f32)
+                                    .name("Kurs"),
+                            );
                         }
                         ChartStyle::Candles => {
                             let elems: Vec<BoxElem> = st
@@ -599,6 +704,7 @@ impl App {
             ui.add_space(6.0);
             ui.label(RichText::new("Egenkapital denne økten").strong().color(GRAY));
             let eq_pts: Vec<[f64; 2]> = st.equity_history.iter().map(|&(t, v)| [t, v]).collect();
+            let eq_min = eq_pts.iter().map(|p| p[1]).fold(f64::MAX, f64::min);
             Plot::new("egenkapital")
                 .height(equity_h - 30.0)
                 .x_axis_formatter(|mark, _range| {
@@ -607,7 +713,13 @@ impl App {
                         .unwrap_or_default()
                 })
                 .show(ui, |plot_ui| {
-                    plot_ui.line(Line::new(PlotPoints::from(eq_pts)).color(YELLOW).width(1.5).name("Egenkapital"));
+                    plot_ui.line(
+                        Line::new(PlotPoints::from(eq_pts))
+                            .color(YELLOW)
+                            .width(1.5)
+                            .fill(eq_min as f32)
+                            .name("Egenkapital"),
+                    );
                 });
         });
     }
@@ -666,7 +778,14 @@ impl App {
                             .unwrap_or_default()
                     })
                     .show(ui, |plot_ui| {
-                        plot_ui.line(Line::new(PlotPoints::from(eq_pts)).color(GREEN).width(2.0).name("Egenkapital"));
+                        let min_y = eq_pts.iter().map(|p| p[1]).fold(f64::MAX, f64::min);
+                        plot_ui.line(
+                            Line::new(PlotPoints::from(eq_pts))
+                                .color(GREEN)
+                                .width(2.0)
+                                .fill(min_y as f32)
+                                .name("Egenkapital"),
+                        );
                     });
 
                 // Beholdning
@@ -1038,6 +1157,8 @@ fn account_card(ui: &mut egui::Ui, title: &str, rows: &[(&str, String, Color32)]
     egui::Frame::group(ui.style())
         .fill(BG_CARD)
         .stroke(egui::Stroke::new(1.0, BORDER))
+        .rounding(egui::Rounding::same(12.0))
+        .shadow(card_shadow())
         .inner_margin(egui::Margin::symmetric(16.0, 12.0))
         .show(ui, |ui| {
             ui.vertical(|ui| {
@@ -1077,7 +1198,8 @@ fn run_backtest(
     let Some(candles) = st.candles.get(symbol) else {
         return Err("Ingen historikk ennå — vent til kursene er lastet.".into());
     };
-    backtest::run(symbol, candles, strategy_name, &st.strategy_cfg).map_err(|e| format!("{e:#}"))
+    backtest::run(symbol, candles, strategy_name, &st.strategy_cfg, &st.backtest_cfg)
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// Rullerende gjennomsnitt over (tid, kurs)-serien — samme beregning som
@@ -1109,11 +1231,13 @@ fn stat_card(ui: &mut egui::Ui, title: &str, value: String, color: Color32) {
     egui::Frame::group(ui.style())
         .fill(BG_CARD)
         .stroke(egui::Stroke::new(1.0, BORDER))
+        .rounding(egui::Rounding::same(10.0))
+        .shadow(card_shadow())
         .inner_margin(egui::Margin::symmetric(14.0, 8.0))
         .show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.label(RichText::new(title).small().color(GRAY));
-                ui.label(RichText::new(value).size(20.0).color(color).strong());
+                ui.label(RichText::new(value).size(21.0).color(color).strong());
             });
         });
 }

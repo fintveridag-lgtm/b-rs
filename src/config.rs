@@ -37,6 +37,27 @@ pub struct Config {
     pub nordnet: NordnetCfg,
     #[serde(default)]
     pub notify: NotifyCfg,
+    #[serde(default)]
+    pub backtest: BacktestCfg,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BacktestCfg {
+    /// Kurtasje i prosent av handelsverdi, per handel.
+    #[serde(default = "default_commission_pct")]
+    pub commission_pct: f64,
+    /// Glidning: forventet ekstra kostnad fordi du sjelden får siste kurs.
+    #[serde(default = "default_slippage_pct")]
+    pub slippage_pct: f64,
+}
+
+impl Default for BacktestCfg {
+    fn default() -> Self {
+        Self {
+            commission_pct: default_commission_pct(),
+            slippage_pct: default_slippage_pct(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -210,6 +231,8 @@ fn default_max_position_value() -> f64 { 25_000.0 }
 fn default_max_orders_per_min() -> u32 { 4 }
 fn default_max_daily_loss() -> f64 { 5_000.0 }
 fn default_stop_loss_pct() -> f64 { 8.0 }
+fn default_commission_pct() -> f64 { 0.15 }
+fn default_slippage_pct() -> f64 { 0.05 }
 fn default_ibkr_base() -> String { "https://localhost:5000/v1/api".into() }
 fn default_revolutx_base() -> String { "https://revx.revolut.com/api/1.0".into() }
 fn default_revolutx_quote() -> String { "USD".into() }

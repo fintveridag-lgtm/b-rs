@@ -67,6 +67,11 @@ take_profit_pct = 0.0         # sikre gevinst automatisk ved +X % (0 = av)
 # private_key_path = "revolutx.pem"
 # quote_currency = "USD"
 
+[backtest]
+# Kostnadsmodell for backtesting — gjør tallene ærligere.
+commission_pct = 0.15   # kurtasje i % av handelsverdi, per handel
+slippage_pct = 0.05     # glidning: forventet avvik fra siste kurs
+
 [notify]
 # Push-varsler til mobil: når boten handler, kill switch slås av/på,
 # og når tapsgrensen stopper handelen. Et testvarsel sendes ved oppstart.

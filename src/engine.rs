@@ -87,7 +87,8 @@ impl Engine {
                 continue;
             }
             self.seeded.insert(symbol.clone());
-            match self.market.history_daily(&symbol, "3mo").await {
+            // 2 år: nok til grafens "Alt"-visning og ærlig backtesting.
+            match self.market.history_daily(&symbol, "2y").await {
                 Ok(bars) if !bars.is_empty() => {
                     let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
                     self.strategy.seed(&symbol, &closes);
