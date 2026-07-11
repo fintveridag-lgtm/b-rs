@@ -8,6 +8,24 @@ pub enum RiskVerdict {
     Blocked(String),
 }
 
+/// Beskyttende exit per posisjon: stop-loss / take-profit i prosent fra
+/// kjøpskurs. 0 betyr avslått. Returnerer begrunnelse hvis posisjonen skal
+/// selges. Disse salgene går UTENOM ordre-risikosjekken — de reduserer
+/// risiko og skal aldri blokkeres av f.eks. tapsgrensen.
+pub fn protective_exit(avg_price: f64, last: f64, stop_loss_pct: f64, take_profit_pct: f64) -> Option<String> {
+    if avg_price <= 0.0 || last <= 0.0 {
+        return None;
+    }
+    let pnl_pct = (last / avg_price - 1.0) * 100.0;
+    if stop_loss_pct > 0.0 && pnl_pct <= -stop_loss_pct {
+        return Some(format!("Stop-loss ({pnl_pct:+.1} %)"));
+    }
+    if take_profit_pct > 0.0 && pnl_pct >= take_profit_pct {
+        return Some(format!("Take-profit ({pnl_pct:+.1} %)"));
+    }
+    None
+}
+
 /// Alle ordrer må gjennom denne før de når megleren. Reglene er bevisst
 /// enkle og harde — de skal stoppe løpske strategier, ikke optimalisere.
 pub struct RiskManager {
@@ -95,6 +113,8 @@ mod tests {
             max_position_value: 2000.0,
             max_orders_per_min: 2,
             max_daily_loss: 500.0,
+            stop_loss_pct: 8.0,
+            take_profit_pct: 0.0,
         }
     }
 
@@ -111,6 +131,19 @@ mod tests {
         let mut r = RiskManager::new(cfg());
         r.observe_equity(10_000.0);
         assert!(matches!(r.check(100.0, 100.0, 9_400.0), RiskVerdict::Blocked(_)));
+    }
+
+    #[test]
+    fn protective_exit_triggers_correctly() {
+        // Stop-loss ved −8 %: 100 → 91 utløser, 100 → 93 gjør ikke.
+        assert!(protective_exit(100.0, 91.0, 8.0, 0.0).unwrap().contains("Stop-loss"));
+        assert!(protective_exit(100.0, 93.0, 8.0, 0.0).is_none());
+        // Take-profit ved +10 %.
+        assert!(protective_exit(100.0, 111.0, 8.0, 10.0).unwrap().contains("Take-profit"));
+        assert!(protective_exit(100.0, 105.0, 8.0, 10.0).is_none());
+        // Avslått (0) utløser aldri; ukjent kostpris ignoreres trygt.
+        assert!(protective_exit(100.0, 50.0, 0.0, 0.0).is_none());
+        assert!(protective_exit(0.0, 50.0, 8.0, 10.0).is_none());
     }
 
     #[test]

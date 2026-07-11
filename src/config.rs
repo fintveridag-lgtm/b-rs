@@ -17,6 +17,10 @@ pub struct Config {
     pub watchlist: Vec<String>,
     #[serde(default = "default_starting_cash")]
     pub starting_cash: f64,
+    /// Sett true (for én kjøring) for å nullstille papirporteføljen —
+    /// ellers gjenopprettes den fra databasen ved oppstart.
+    #[serde(default)]
+    pub paper_reset: bool,
     #[serde(default = "default_db_path")]
     pub db_path: String,
     /// Kreves av den konsoll-løse GUI-varianten (b-rs-gui) for live-handel,
@@ -119,6 +123,12 @@ pub struct RiskCfg {
     /// Maks tap (i kontovaluta) siden oppstart før all handel stoppes.
     #[serde(default = "default_max_daily_loss")]
     pub max_daily_loss: f64,
+    /// Selg posisjonen automatisk ved −X % fra kjøpskurs (0 = av).
+    #[serde(default = "default_stop_loss_pct")]
+    pub stop_loss_pct: f64,
+    /// Sikre gevinst automatisk ved +X % fra kjøpskurs (0 = av).
+    #[serde(default)]
+    pub take_profit_pct: f64,
 }
 
 impl Default for RiskCfg {
@@ -128,6 +138,8 @@ impl Default for RiskCfg {
             max_position_value: default_max_position_value(),
             max_orders_per_min: default_max_orders_per_min(),
             max_daily_loss: default_max_daily_loss(),
+            stop_loss_pct: default_stop_loss_pct(),
+            take_profit_pct: 0.0,
         }
     }
 }
@@ -197,6 +209,7 @@ fn default_max_order_value() -> f64 { 10_000.0 }
 fn default_max_position_value() -> f64 { 25_000.0 }
 fn default_max_orders_per_min() -> u32 { 4 }
 fn default_max_daily_loss() -> f64 { 5_000.0 }
+fn default_stop_loss_pct() -> f64 { 8.0 }
 fn default_ibkr_base() -> String { "https://localhost:5000/v1/api".into() }
 fn default_revolutx_base() -> String { "https://revx.revolut.com/api/1.0".into() }
 fn default_revolutx_quote() -> String { "USD".into() }

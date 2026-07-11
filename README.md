@@ -50,7 +50,7 @@ Taster i terminalversjonen: `q` avslutt · `k` kill switch (kanseller + stopp ha
 | `market` | Markedsskjermene: mest omsatte, daytrading-kandidater, fond/ETF-er og teknisk ukesanalyse |
 | `strategy` | `Strategy`-traiten + `sma_cross`, `rsi` og `momentum` — byttes i appen |
 | `backtest` | Kjør en strategi over historikken og sammenlign med kjøp-og-hold |
-| `risk` | Harde grenser: maks ordreverdi, maks posisjon, ratebegrensning, tapsgrense |
+| `risk` | Harde grenser: maks ordreverdi, maks posisjon, ratebegrensning, tapsgrense — pluss stop-loss/take-profit per posisjon |
 | `engine` | Hovedløkken: kurser → strategi → risikosjekk → ordre → tilstand |
 | `nordnet` | **Lesemodus** mot Nordnets uoffisielle web-API (kun portefølje, aldri handel) |
 | `notify` | Push-varsler til mobil via ntfy.sh eller Telegram (ordrer, kill switch, tapsgrense) |

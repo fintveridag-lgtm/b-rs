@@ -2,7 +2,7 @@ use crate::broker::Broker;
 use crate::config::Config;
 use crate::marketdata::Yahoo;
 use crate::notify::Notifier;
-use crate::risk::{RiskManager, RiskVerdict};
+use crate::risk::{protective_exit, RiskManager, RiskVerdict};
 use crate::state::{Flags, SharedState};
 use crate::store::Store;
 use crate::strategy::Strategy;
@@ -28,6 +28,9 @@ pub struct Engine {
     was_killed: bool,
     /// Symboler som allerede er sådd med historikk.
     seeded: HashSet<String>,
+    /// Symboler med utestående beskyttende salg (stop-loss/take-profit),
+    /// så vi ikke sender samme salg flere ganger mens ordren fylles.
+    protected: HashSet<String>,
 }
 
 impl Engine {
@@ -54,6 +57,7 @@ impl Engine {
             notifier,
             was_killed: false,
             seeded: HashSet::new(),
+            protected: HashSet::new(),
         }
     }
 
@@ -205,8 +209,38 @@ impl Engine {
         let equity = cash + positions.iter().map(|p| p.market_value()).sum::<f64>();
         self.risk.observe_equity(equity);
 
-        // 3) Manuelle ordrer fra GUI-et. De går gjennom risikoreglene og
-        //    stoppes av kill switch, men ikke av strategipausen.
+        // 3) Beskyttende exits: stop-loss / take-profit per posisjon.
+        //    Kjører også under strategipause (beskytter beholdningen),
+        //    men aldri når kill switch er på.
+        self.protected
+            .retain(|s| positions.iter().any(|p| p.symbol == *s && p.qty > 1e-9));
+        if !self.flags.killed() {
+            let sl = self.cfg.risk.stop_loss_pct;
+            let tp = self.cfg.risk.take_profit_pct;
+            let mut exits = Vec::new();
+            for p in &positions {
+                if p.qty <= 0.0 || self.protected.contains(&p.symbol) {
+                    continue;
+                }
+                let Some(q) = fresh.iter().find(|q| q.symbol == p.symbol) else { continue };
+                if let Some(reason) = protective_exit(p.avg_price, q.last, sl, tp) {
+                    exits.push((p.symbol.clone(), p.qty, q.last, reason));
+                }
+            }
+            for (symbol, qty, price, reason) in exits {
+                self.protected.insert(symbol.clone());
+                self.log(format!("{reason} utløst for {symbol} — selger hele posisjonen."));
+                self.notify(format!("🛡️ {reason}: selger {symbol}"));
+                let result = self.place(&symbol, Side::Sell, qty, price, &reason).await;
+                if matches!(result, None | Some(OrderStatus::Rejected)) {
+                    // Ordren nådde ikke frem — prøv igjen neste tikk.
+                    self.protected.remove(&symbol);
+                }
+            }
+        }
+
+        //    Manuelle ordrer går gjennom risikoreglene og stoppes av
+        //    kill switch, men ikke av strategipausen.
         let manual: Vec<(String, Side, f64)> = {
             let mut st = self.state.lock().unwrap();
             st.manual_orders.drain(..).collect()
@@ -234,11 +268,13 @@ impl Engine {
                 RiskVerdict::Blocked(reason) => {
                     self.log(format!("Manuell {side} {symbol} blokkert av risikoregel: {reason}"));
                 }
-                RiskVerdict::Ok => self.place(&symbol, side, qty, price, "manuell ordre").await,
+                RiskVerdict::Ok => {
+                    let _ = self.place(&symbol, side, qty, price, "manuell ordre").await;
+                }
             }
         }
 
-        // 4) Strategisignaler → risikosjekk → ordre.
+        // 5) Strategisignaler → risikosjekk → ordre.
         if !self.flags.killed() && !self.flags.paused() {
             for q in &fresh {
                 let Some(side) = self.strategy.on_price(&q.symbol, q.last) else {
@@ -273,13 +309,13 @@ impl Engine {
                     }
                     RiskVerdict::Ok => {
                         let note = format!("signal fra {}", self.strategy.name());
-                        self.place(&q.symbol, side, qty, q.last, &note).await;
+                        let _ = self.place(&q.symbol, side, qty, q.last, &note).await;
                     }
                 }
             }
         }
 
-        // 5) Oppdater UI-tilstand.
+        // 6) Oppdater UI-tilstand.
         let positions = self.broker.positions().await.unwrap_or(positions);
         let cash = self.broker.cash().await.unwrap_or(cash);
         let equity = cash + positions.iter().map(|p| p.market_value()).sum::<f64>();
@@ -300,7 +336,14 @@ impl Engine {
         }
     }
 
-    async fn place(&mut self, symbol: &str, side: Side, qty: f64, price: f64, note: &str) {
+    async fn place(
+        &mut self,
+        symbol: &str,
+        side: Side,
+        qty: f64,
+        price: f64,
+        note: &str,
+    ) -> Option<OrderStatus> {
         let req = OrderRequest {
             symbol: symbol.to_string(),
             side,
@@ -310,12 +353,13 @@ impl Engine {
         };
         match self.broker.place_order(req).await {
             Ok(order) => {
-                let level = if order.status == OrderStatus::Rejected { "AVVIST" } else { "ORDRE" };
+                let status = order.status;
+                let level = if status == OrderStatus::Rejected { "AVVIST" } else { "ORDRE" };
                 self.log(format!(
                     "{level}: {} {} x{:.0} @ {:.2} [{}]",
                     order.side, order.symbol, order.qty, order.avg_price, order.status
                 ));
-                if order.status != OrderStatus::Rejected {
+                if status != OrderStatus::Rejected {
                     self.notify(format!(
                         "{} {} x{:.0} @ {:.2} [{}] — {}",
                         order.side, order.symbol, order.qty, order.avg_price, order.status, order.note
@@ -335,8 +379,12 @@ impl Engine {
                 let mut st = self.state.lock().unwrap();
                 st.push_transaction(tx);
                 st.push_order(order);
+                Some(status)
             }
-            Err(e) => self.log(format!("Ordre feilet for {symbol}: {e:#}")),
+            Err(e) => {
+                self.log(format!("Ordre feilet for {symbol}: {e:#}"));
+                None
+            }
         }
     }
 }

@@ -21,8 +21,14 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
         .enable_all()
         .build()?;
 
+    let store = Arc::new(store::Store::open(&cfg.db_path)?);
+
     let broker: Arc<dyn Broker> = match (cfg.is_live(), cfg.broker.as_str()) {
-        (false, _) | (true, "paper") => Arc::new(broker::paper::PaperBroker::new(cfg.starting_cash)),
+        (false, _) | (true, "paper") => Arc::new(broker::paper::PaperBroker::new(
+            cfg.starting_cash,
+            Some(store.clone()),
+            cfg.paper_reset,
+        )),
         (true, "ibkr") => {
             let ibkr_cfg = cfg.ibkr.as_ref().context("[ibkr]-seksjon mangler i konfig")?;
             let b = broker::ibkr::IbkrBroker::new(ibkr_cfg)?;
@@ -41,7 +47,6 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
     let effective_mode = if cfg.is_live() && cfg.broker != "paper" { "live" } else { "paper" };
     let strategy = strategy::build(&cfg.strategy)?;
     let market = marketdata::Yahoo::new()?;
-    let store = Arc::new(store::Store::open(&cfg.db_path)?);
     let state = Arc::new(Mutex::new(UiState::new(
         effective_mode,
         broker.name(),
@@ -56,6 +61,19 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
         st.start_cash = cfg.starting_cash;
         // Transaksjonshistorikk fra tidligere økter.
         st.transactions = store.recent_orders(500).unwrap_or_default();
+        // Fortell brukeren om papirporteføljen ble gjenopprettet.
+        if !cfg.is_live() || cfg.broker == "paper" {
+            if cfg.paper_reset {
+                st.log("Papirporteføljen er nullstilt (paper_reset = true).");
+            } else if let Ok(Some((cash, positions))) = store.load_paper_state() {
+                if !positions.is_empty() || (cash - cfg.starting_cash).abs() > 0.005 {
+                    st.log(format!(
+                        "Papirportefølje gjenopprettet fra forrige økt: {cash:.0} kr kontanter, {} posisjoner.",
+                        positions.len()
+                    ));
+                }
+            }
+        }
     }
     let flags = Arc::new(Flags::default());
 
