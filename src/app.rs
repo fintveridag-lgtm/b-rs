@@ -29,6 +29,12 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
             rt.block_on(b.check_session())?;
             Arc::new(b)
         }
+        (true, "revolutx") => {
+            let rx_cfg = cfg.revolutx.as_ref().context("[revolutx]-seksjon mangler i konfig")?;
+            let b = broker::revolutx::RevolutXBroker::new(rx_cfg)?;
+            rt.block_on(b.check_session())?;
+            Arc::new(b)
+        }
         (true, other) => anyhow::bail!("ukjent megler: {other}"),
     };
 

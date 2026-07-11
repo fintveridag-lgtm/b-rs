@@ -45,7 +45,7 @@ Taster i terminalversjonen: `q` avslutt · `k` kill switch (kanseller + stopp ha
 
 | Modul | Ansvar |
 |---|---|
-| `broker/` | `Broker`-traiten + implementasjoner: `paper` (simulering), `ibkr` (Interactive Brokers Client Portal REST) |
+| `broker/` | `Broker`-traiten + implementasjoner: `paper` (simulering), `ibkr` (aksjer, Interactive Brokers) og `revolutx` (krypto, Revolut X med Ed25519-signert REST) |
 | `marketdata` | Kurser og historikk fra Yahoo Finance (gratis, ~15 min forsinket; `.OL`-suffiks for Oslo Børs) |
 | `market` | Markedsskjermene: mest omsatte, daytrading-kandidater, fond/ETF-er og teknisk ukesanalyse |
 | `strategy` | `Strategy`-traiten + `sma_cross`, `rsi` og `momentum` — byttes i appen |
@@ -71,6 +71,23 @@ offisielle API igjen.
 
 **Test alltid strategien grundig i papirmodus først.** Risikogrensene i
 `[risk]` er siste skanse, ikke strategi.
+
+## Krypto via Revolut X
+
+Revolut har ikke API for aksjehandel på personkontoer, men kryptobørsen
+**Revolut X** har et offisielt REST-API som boten støtter:
+
+1. Lag et Ed25519-nøkkelpar: `openssl genpkey -algorithm ed25519 -out revolutx.pem`
+2. Registrer den offentlige delen (`openssl pkey -in revolutx.pem -pubout`)
+   i Revolut X → Settings → API keys, og sett API-nøkkelen i miljøvariabelen
+   `REVOLUTX_API_KEY`.
+3. I `config.toml`: `broker = "revolutx"`, fyll ut `[revolutx]`-seksjonen,
+   og bruk kryptosymboler i watchlisten (`BTC-USD`, `ETH-USD`, …) — samme
+   format fungerer for kursdata og handel.
+
+Kryptomarkedet er åpent hele døgnet, så papirmodus kan testes når som helst.
+Merk: Revolut X oppgir ikke kostpris via API-et, så «urealisert» vises som 0
+for Revolut X-posisjoner.
 
 ## Nordnet-lesemodus
 

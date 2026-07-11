@@ -7,7 +7,8 @@ mode = "paper"
 # så den krever i tillegg live_ok = true for å handle live. Ellers papirmodus.
 live_ok = false
 
-# "paper" eller "ibkr" (Interactive Brokers via Client Portal Gateway).
+# "paper", "ibkr" (aksjer via Interactive Brokers) eller
+# "revolutx" (krypto via Revolut X).
 broker = "paper"
 
 # Sekunder mellom hver kursoppdatering. Yahoo-data er ~15 min forsinket,
@@ -48,6 +49,18 @@ max_daily_loss = 5000.0       # stopp all handel ved dette tapet
 # base_url = "https://localhost:5000/v1/api"
 # account = "U1234567"
 # accept_invalid_certs = true   # gatewayen bruker selvsignert sertifikat
+
+# Revolut X — krypto. Kreves bare når broker = "revolutx" og mode = "live".
+# Oppsett:
+#   1. Lag nøkkelpar:  openssl genpkey -algorithm ed25519 -out revolutx.pem
+#      Offentlig del:  openssl pkey -in revolutx.pem -pubout
+#   2. Registrer offentlig nøkkel i Revolut X → Settings → API keys,
+#      og sett API-nøkkelen du får i miljøvariabelen REVOLUTX_API_KEY.
+#   3. Bruk kryptosymboler i watchlisten, f.eks. "BTC-USD", "ETH-USD" —
+#      samme format fungerer for både kursdata (Yahoo) og handel (Revolut X).
+# [revolutx]
+# private_key_path = "revolutx.pem"
+# quote_currency = "USD"
 
 [notify]
 # Push-varsler til mobil: når boten handler, kill switch slås av/på,

@@ -1,5 +1,6 @@
 pub mod ibkr;
 pub mod paper;
+pub mod revolutx;
 
 use crate::types::{Order, OrderRequest, Position};
 use anyhow::Result;

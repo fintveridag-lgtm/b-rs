@@ -28,6 +28,7 @@ pub struct Config {
     #[serde(default)]
     pub risk: RiskCfg,
     pub ibkr: Option<IbkrCfg>,
+    pub revolutx: Option<RevolutXCfg>,
     #[serde(default)]
     pub nordnet: NordnetCfg,
     #[serde(default)]
@@ -144,6 +145,19 @@ pub struct IbkrCfg {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct RevolutXCfg {
+    #[serde(default = "default_revolutx_base")]
+    pub base_url: String,
+    /// Sti til Ed25519-privatnøkkelen (PKCS#8 PEM) du registrerte hos
+    /// Revolut X. API-nøkkelen leses fra miljøvariabelen REVOLUTX_API_KEY.
+    pub private_key_path: String,
+    /// Fiat-valutaen kontoen handler mot, f.eks. "USD" — brukes som
+    /// kontantsaldo og som suffiks i symbolene ("BTC-USD").
+    #[serde(default = "default_revolutx_quote")]
+    pub quote_currency: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct NordnetCfg {
     /// Lesemodus: hent portefølje fra Nordnet (uoffisielt API).
     /// Brukernavn/passord leses fra NORDNET_USERNAME / NORDNET_PASSWORD.
@@ -184,6 +198,8 @@ fn default_max_position_value() -> f64 { 25_000.0 }
 fn default_max_orders_per_min() -> u32 { 4 }
 fn default_max_daily_loss() -> f64 { 5_000.0 }
 fn default_ibkr_base() -> String { "https://localhost:5000/v1/api".into() }
+fn default_revolutx_base() -> String { "https://revx.revolut.com/api/1.0".into() }
+fn default_revolutx_quote() -> String { "USD".into() }
 fn default_true() -> bool { true }
 fn default_nordnet_base() -> String { "https://www.nordnet.no/api/2".into() }
 fn default_notify_provider() -> String { "ntfy".into() }
@@ -200,6 +216,12 @@ impl Config {
         );
         if cfg.mode == "live" && cfg.broker == "ibkr" {
             anyhow::ensure!(cfg.ibkr.is_some(), "mode=live med broker=ibkr krever [ibkr]-seksjon");
+        }
+        if cfg.mode == "live" && cfg.broker == "revolutx" {
+            anyhow::ensure!(
+                cfg.revolutx.is_some(),
+                "mode=live med broker=revolutx krever [revolutx]-seksjon"
+            );
         }
         Ok(cfg)
     }
