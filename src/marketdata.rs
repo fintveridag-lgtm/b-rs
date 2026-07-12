@@ -74,6 +74,32 @@ impl Yahoo {
         parse_history(symbol, &result)
     }
 
+    /// Søk etter aksjer/ETF-er/krypto med fritekst («kongsberg») —
+    /// returnerer (symbol, beskrivelse)-par klare for watchlisten.
+    pub async fn search(&self, query: &str) -> Result<Vec<(String, String)>> {
+        let url = reqwest::Url::parse_with_params(
+            "https://query1.finance.yahoo.com/v1/finance/search",
+            &[("q", query), ("quotesCount", "8"), ("newsCount", "0")],
+        )?;
+        let v = self.get_json(url.as_str()).await?;
+        let mut out = Vec::new();
+        for q in v.get("quotes").and_then(Value::as_array).cloned().unwrap_or_default() {
+            let Some(symbol) = q.get("symbol").and_then(Value::as_str) else { continue };
+            let kind = q.get("quoteType").and_then(Value::as_str).unwrap_or("");
+            if !matches!(kind, "EQUITY" | "ETF" | "CRYPTOCURRENCY" | "INDEX" | "MUTUALFUND") {
+                continue;
+            }
+            let name = q
+                .get("shortname")
+                .or_else(|| q.get("longname"))
+                .and_then(Value::as_str)
+                .unwrap_or(symbol);
+            let exchange = q.get("exchDisp").and_then(Value::as_str).unwrap_or("");
+            out.push((symbol.to_string(), format!("{name} ({exchange})")));
+        }
+        Ok(out)
+    }
+
     /// Alt markedsskjermene trenger i ett kall: siste kurs, dagsvolum og
     /// tre måneder daglig historikk.
     pub async fn snapshot(&self, symbol: &str) -> Result<Snapshot> {

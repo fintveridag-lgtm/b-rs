@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::Path;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct Config {
     /// "paper" (simulering) eller "live" (ekte ordrer via valgt megler).
     #[serde(default = "default_mode")]
@@ -37,7 +37,9 @@ pub struct Config {
     pub strategy: StrategyCfg,
     #[serde(default)]
     pub risk: RiskCfg,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ibkr: Option<IbkrCfg>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub revolutx: Option<RevolutXCfg>,
     #[serde(default)]
     pub nordnet: NordnetCfg,
@@ -47,7 +49,7 @@ pub struct Config {
     pub backtest: BacktestCfg,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct BacktestCfg {
     /// Kurtasje i prosent av handelsverdi, per handel.
     #[serde(default = "default_commission_pct")]
@@ -66,7 +68,7 @@ impl Default for BacktestCfg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct NotifyCfg {
     /// Push-varsler til mobil når boten handler m.m.
     #[serde(default)]
@@ -96,7 +98,7 @@ impl Default for NotifyCfg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct StrategyCfg {
     #[serde(default = "default_strategy_name")]
     pub name: String,
@@ -141,7 +143,7 @@ impl Default for StrategyCfg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct RiskCfg {
     /// Maks verdi (i kontovaluta) per enkeltordre.
     #[serde(default = "default_max_order_value")]
@@ -181,7 +183,7 @@ impl Default for RiskCfg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct IbkrCfg {
     /// Client Portal Gateway, typisk https://localhost:5000/v1/api
     #[serde(default = "default_ibkr_base")]
@@ -193,7 +195,7 @@ pub struct IbkrCfg {
     pub accept_invalid_certs: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct RevolutXCfg {
     #[serde(default = "default_revolutx_base")]
     pub base_url: String,
@@ -206,7 +208,7 @@ pub struct RevolutXCfg {
     pub quote_currency: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct NordnetCfg {
     /// Lesemodus: hent portefølje fra Nordnet (uoffisielt API).
     /// Brukernavn/passord leses fra NORDNET_USERNAME / NORDNET_PASSWORD.

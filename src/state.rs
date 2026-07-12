@@ -86,6 +86,13 @@ pub struct UiState {
     pub poll_secs: u64,
     /// Loggfil — alle hendelser speiles hit for feilsøking i ettertid.
     pub log_path: Option<String>,
+    /// Toasts: (utløps-unixtid, melding) — små popup-kort i GUI-et.
+    pub toasts: VecDeque<(i64, String)>,
+    /// Aksjesøk: resultater og ventestatus.
+    pub search_results: Vec<(String, String)>,
+    pub search_pending: bool,
+    /// Ny versjon tilgjengelig: (versjon, nedlastingsside).
+    pub update_available: Option<(String, String)>,
 }
 
 /// Brukerdefinert kursalarm — varsler mobil/logg når nivået brytes.
@@ -147,6 +154,18 @@ impl UiState {
             fx_rates: BTreeMap::new(),
             poll_secs: 15,
             log_path: None,
+            toasts: VecDeque::new(),
+            search_results: Vec::new(),
+            search_pending: false,
+            update_available: None,
+        }
+    }
+
+    /// Vis et lite popup-kort i 6 sekunder.
+    pub fn toast(&mut self, msg: impl Into<String>) {
+        self.toasts.push_back((Utc::now().timestamp() + 6, msg.into()));
+        while self.toasts.len() > 5 {
+            self.toasts.pop_front();
         }
     }
 
@@ -193,6 +212,11 @@ impl UiState {
     }
 
     pub fn push_order(&mut self, order: Order) {
+        let icon = if order.status == crate::types::OrderStatus::Rejected { "❌" } else { "✅" };
+        self.toast(format!(
+            "{icon} {} {} x{} @ {:.2}",
+            order.side, order.symbol, order.qty, order.avg_price
+        ));
         self.orders.push_front(order);
         self.orders.truncate(100);
     }

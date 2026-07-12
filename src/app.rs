@@ -14,6 +14,12 @@ use std::sync::{Arc, Mutex};
 /// Felles oppstart for begge programfilene: bygg megler, engine og UI,
 /// og kjør til brukeren avslutter.
 pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
+    start_with_path(cfg, use_tui, None)
+}
+
+/// Som `start`, men husker hvilken konfigfil som ble brukt — så
+/// Innstillinger-fanen i GUI-et kan lagre tilbake til riktig fil.
+pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path::PathBuf>) -> Result<()> {
     // Engine og meglere er async — de kjører på en tokio-runtime i bakgrunnen,
     // mens GUI/TUI eier hovedtråden.
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -47,7 +53,7 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
     };
 
     let effective_mode = if cfg.is_live() && cfg.broker != "paper" { "live" } else { "paper" };
-    let market = marketdata::Yahoo::new()?;
+    let market = Arc::new(marketdata::Yahoo::new()?);
     let state = Arc::new(Mutex::new(UiState::new(
         effective_mode,
         broker.name(),
@@ -95,13 +101,16 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
     let engine = engine::Engine::new(
         cfg.clone(),
         broker,
-        market,
+        market.clone(),
         store.clone(),
         state.clone(),
         flags.clone(),
         notifier,
     )?;
     rt.spawn(engine.run());
+
+    // Sjekk om en nyere versjon er publisert på GitHub (stille ved feil).
+    spawn_update_check(&rt, state.clone());
 
     if cfg.nordnet.enabled {
         rt.spawn(engine::nordnet_task(cfg.clone(), state.clone(), flags.clone()));
@@ -117,12 +126,69 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
     let result = if use_tui {
         ui::run(state, flags.clone())
     } else {
-        gui::run(state, flags.clone(), store)
+        gui::run(gui::GuiDeps {
+            state,
+            flags: flags.clone(),
+            store,
+            market,
+            rt: rt.handle().clone(),
+            cfg: cfg.clone(),
+            config_path,
+        })
     };
 
     flags.quit.store(true, std::sync::atomic::Ordering::Relaxed);
     rt.shutdown_timeout(std::time::Duration::from_secs(5));
     result
+}
+
+/// Spør GitHub om siste utgivelse og flagg i UI-et hvis den er nyere.
+/// Feiler stille (privat repo uten token, ingen nett, ingen releases).
+fn spawn_update_check(rt: &tokio::runtime::Runtime, state: crate::state::SharedState) {
+    rt.spawn(async move {
+        let Ok(client) = reqwest::Client::builder()
+            .user_agent("b-rs")
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        else {
+            return;
+        };
+        let mut req = client.get("https://api.github.com/repos/fintveridag-lgtm/b-rs/releases/latest");
+        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+            req = req.bearer_auth(token);
+        }
+        let Ok(resp) = req.send().await else { return };
+        if !resp.status().is_success() {
+            return;
+        }
+        let Ok(v) = resp.json::<serde_json::Value>().await else { return };
+        let Some(tag) = v.get("tag_name").and_then(|t| t.as_str()) else { return };
+        let url = v
+            .get("html_url")
+            .and_then(|u| u.as_str())
+            .unwrap_or("https://github.com/fintveridag-lgtm/b-rs/releases")
+            .to_string();
+        if is_newer_version(tag, env!("CARGO_PKG_VERSION")) {
+            let mut st = state.lock().unwrap();
+            st.log(format!("📥 Ny versjon tilgjengelig: {tag} (du har v{}).", env!("CARGO_PKG_VERSION")));
+            st.update_available = Some((tag.to_string(), url));
+        }
+    });
+}
+
+/// Er "v1.2.3" nyere enn "1.0.0"? Numerisk sammenligning per ledd.
+fn is_newer_version(tag: &str, current: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.trim_start_matches('v')
+            .split('.')
+            .filter_map(|p| p.parse().ok())
+            .collect()
+    };
+    let (a, b) = (parse(tag), parse(current));
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    a > b
 }
 
 /// Loggfil ved siden av databasen; roteres til .old når den passerer 5 MB.
@@ -179,14 +245,15 @@ fn backup_database(db_path: &str) -> Option<String> {
 ///   4. innebygd standardkonfig (papirhandel)
 ///
 /// Punkt 3 og 4 gjør at programfilen kan dobbeltklikkes hvor som helst.
-pub fn load_config(config_arg: Option<String>) -> Result<Config> {
+pub fn load_config(config_arg: Option<String>) -> Result<(Config, Option<PathBuf>)> {
     if let Some(arg) = config_arg {
-        return config::Config::load(&PathBuf::from(arg));
+        let path = PathBuf::from(arg);
+        return Ok((config::Config::load(&path)?, Some(path)));
     }
 
     let local = PathBuf::from("config.toml");
     if local.exists() {
-        return config::Config::load(&local);
+        return Ok((config::Config::load(&local)?, Some(local)));
     }
 
     if let Ok(exe) = std::env::current_exe() {
@@ -195,12 +262,26 @@ pub fn load_config(config_arg: Option<String>) -> Result<Config> {
                 let candidate = dir.join(name);
                 if candidate.exists() {
                     eprintln!("Bruker konfig fra {}", candidate.display());
-                    return config::Config::load(&candidate);
+                    return Ok((config::Config::load(&candidate)?, Some(candidate)));
                 }
             }
         }
     }
 
     eprintln!("Fant ingen config.toml — bruker innebygd standardkonfig (papirhandel).");
-    config::Config::parse(include_str!("../config.example.toml"))
+    Ok((config::Config::parse(include_str!("../config.example.toml"))?, None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_newer_version;
+
+    #[test]
+    fn version_comparison() {
+        assert!(is_newer_version("v1.1.0", "1.0.0"));
+        assert!(is_newer_version("v2.0.0", "1.9.9"));
+        assert!(!is_newer_version("v1.0.0", "1.0.0"));
+        assert!(!is_newer_version("v0.9.0", "1.0.0"));
+        assert!(!is_newer_version("tull", "1.0.0"));
+    }
 }

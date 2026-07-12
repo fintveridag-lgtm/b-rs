@@ -20,7 +20,7 @@ use std::time::Duration;
 pub struct Engine {
     cfg: Config,
     broker: Arc<dyn Broker>,
-    market: Yahoo,
+    market: Arc<Yahoo>,
     /// Én strategiinstans per strateginavn — hver instans håndterer alle
     /// symbolene som er tilordnet den (standard eller per-aksje-valg).
     strategies: HashMap<String, Box<dyn Strategy>>,
@@ -54,7 +54,7 @@ impl Engine {
     pub fn new(
         cfg: Config,
         broker: Arc<dyn Broker>,
-        market: Yahoo,
+        market: Arc<Yahoo>,
         store: Arc<Store>,
         state: SharedState,
         flags: Arc<Flags>,
@@ -356,7 +356,8 @@ impl Engine {
                 let _ = self.store.save_alarms(&alarms);
                 for msg in fired {
                     self.log(msg.clone());
-                    self.notify(msg);
+                    self.notify(msg.clone());
+                    self.state.lock().unwrap().toast(msg);
                 }
             }
         }

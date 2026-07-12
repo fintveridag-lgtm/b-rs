@@ -32,6 +32,8 @@ enum View {
     Marked,
     Analyse,
     Kalender,
+    Innstillinger,
+    Hjelp,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -81,8 +83,20 @@ impl ChartRange {
     }
 }
 
+/// Alt GUI-et trenger fra oppstarten, samlet.
+pub struct GuiDeps {
+    pub state: SharedState,
+    pub flags: Arc<Flags>,
+    pub store: Arc<Store>,
+    pub market: Arc<crate::marketdata::Yahoo>,
+    pub rt: tokio::runtime::Handle,
+    pub cfg: crate::config::Config,
+    pub config_path: Option<std::path::PathBuf>,
+}
+
 /// Grafisk vindu med knapper og kursgraf. Blokkerer til vinduet lukkes.
-pub fn run(state: SharedState, flags: Arc<Flags>, store: Arc<Store>) -> Result<()> {
+pub fn run(deps: GuiDeps) -> Result<()> {
+    let GuiDeps { state, flags, store, market, rt, cfg, config_path } = deps;
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 850.0])
         .with_min_inner_size([980.0, 640.0])
@@ -98,6 +112,14 @@ pub fn run(state: SharedState, flags: Arc<Flags>, store: Arc<Store>) -> Result<(
         state,
         flags: flags.clone(),
         store,
+        market,
+        rt,
+        settings: cfg,
+        config_path: config_path.unwrap_or_else(|| std::path::PathBuf::from("config.toml")),
+        settings_msg: None,
+        search_query: String::new(),
+        allow_close: false,
+        show_close_dialog: false,
         view: View::Handel,
         selected: None,
         range: ChartRange::ThreeMonths,
@@ -205,6 +227,15 @@ struct App {
     state: SharedState,
     flags: Arc<Flags>,
     store: Arc<Store>,
+    market: Arc<crate::marketdata::Yahoo>,
+    rt: tokio::runtime::Handle,
+    /// Redigerbar kopi av konfigurasjonen — lagres til config_path.
+    settings: crate::config::Config,
+    config_path: std::path::PathBuf,
+    settings_msg: Option<(String, bool)>,
+    search_query: String,
+    allow_close: bool,
+    show_close_dialog: bool,
     view: View,
     selected: Option<String>,
     range: ChartRange,
@@ -222,6 +253,88 @@ struct App {
 }
 
 impl App {
+    /// Skriv innstillingene til konfigfilen (kommentarer erstattes).
+    fn write_settings(&mut self) -> anyhow::Result<()> {
+        let body = toml::to_string_pretty(&self.settings)?;
+        let content = format!(
+            "# b-rs-konfigurasjon — skrevet av Innstillinger-fanen i appen.\n# Full dokumentasjon: config.example.toml i prosjektmappen.\n\n{body}"
+        );
+        std::fs::write(&self.config_path, content)?;
+        Ok(())
+    }
+
+    /// Hold konfigfilens watchlist i takt med endringer gjort i appen.
+    fn sync_watchlist(&mut self, watchlist: &[String]) {
+        self.settings.watchlist = watchlist.to_vec();
+        let _ = self.write_settings();
+    }
+
+    /// Tegn aktive toasts øverst til høyre; utløpte fjernes.
+    fn draw_toasts(&self, ctx: &egui::Context, st: &mut UiState) {
+        let now = chrono::Utc::now().timestamp();
+        st.toasts.retain(|(expiry, _)| *expiry > now);
+        if st.toasts.is_empty() {
+            return;
+        }
+        egui::Area::new(egui::Id::new("toasts"))
+            .anchor(egui::Align2::RIGHT_TOP, [-14.0, 96.0])
+            .interactable(false)
+            .show(ctx, |ui| {
+                for (_, msg) in &st.toasts {
+                    egui::Frame::group(ui.style())
+                        .fill(BG_CARD)
+                        .stroke(egui::Stroke::new(1.0, GREEN))
+                        .rounding(egui::Rounding::same(10.0))
+                        .shadow(card_shadow())
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(msg).strong());
+                        });
+                    ui.add_space(4.0);
+                }
+            });
+    }
+
+    /// Lukkeknappen: tilby å minimere i stedet, så boten jobber videre.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.show_close_dialog = true;
+        }
+        if !self.show_close_dialog {
+            return;
+        }
+        egui::Window::new("Avslutte b-rs?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Boten stopper helt når appen lukkes.");
+                ui.label("Vil du heller minimere den, så den jobber videre?");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(RichText::new("Minimer").color(Color32::BLACK)).fill(GREEN))
+                        .clicked()
+                    {
+                        self.show_close_dialog = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    }
+                    if ui
+                        .add(egui::Button::new(RichText::new("Avslutt").color(Color32::WHITE)).fill(RED))
+                        .clicked()
+                    {
+                        self.allow_close = true;
+                        self.show_close_dialog = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if ui.button("Avbryt").clicked() {
+                        self.show_close_dialog = false;
+                    }
+                });
+            });
+    }
+
     /// Realiserte handler (FIFO), gjenberegnet når nye transaksjoner kommer.
     fn realized(&mut self, st: &UiState) -> &[RealizedTrade] {
         let marker = st.transactions.len();
@@ -260,7 +373,12 @@ impl eframe::App for App {
             View::Marked => self.market_view(ctx, &mut st),
             View::Analyse => self.analyse_view(ctx, &st),
             View::Kalender => self.calendar_view(ctx, &st),
+            View::Innstillinger => self.settings_view(ctx, &mut st),
+            View::Hjelp => self.help_view(ctx),
         }
+
+        self.draw_toasts(ctx, &mut st);
+        self.handle_close_request(ctx);
     }
 }
 
@@ -293,6 +411,16 @@ impl App {
                 } else {
                     ui.spinner();
                     ui.label(RichText::new("henter kursdata …").color(GRAY));
+                }
+
+                if let Some((version, url)) = st.update_available.clone() {
+                    let btn = egui::Button::new(
+                        RichText::new(format!("📥 Ny versjon {version} — last ned")).color(Color32::BLACK),
+                    )
+                    .fill(GREEN);
+                    if ui.add(btn).clicked() {
+                        ctx.open_url(egui::OpenUrl::new_tab(url));
+                    }
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -347,6 +475,8 @@ impl App {
                     (View::Marked, "🔥 Markedet"),
                     (View::Analyse, "🔮 Uken"),
                     (View::Kalender, "📅 Kalender"),
+                    (View::Innstillinger, "⚙ Innstillinger"),
+                    (View::Hjelp, "❓ Hjelp"),
                 ] {
                     let active = self.view == view;
                     let text = if active {
@@ -371,12 +501,59 @@ impl App {
                 ui.add_space(6.0);
                 section_heading(ui, "📋 Watchlist");
                 ui.small("Klikk på et symbol for å vise grafen.");
+
+                // Aksjesøk: skriv navn eller ticker, trykk Enter.
+                ui.horizontal(|ui| {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.search_query)
+                            .hint_text("Søk aksje/fond/krypto …")
+                            .desired_width(180.0),
+                    );
+                    let go = ui.button("🔍").clicked()
+                        || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    if go && !self.search_query.trim().is_empty() {
+                        st.search_pending = true;
+                        st.search_results.clear();
+                        let market = self.market.clone();
+                        let state = self.state.clone();
+                        let query = self.search_query.trim().to_string();
+                        self.rt.spawn(async move {
+                            let results = market.search(&query).await.unwrap_or_default();
+                            let mut st = state.lock().unwrap();
+                            st.search_pending = false;
+                            if results.is_empty() {
+                                st.log(format!("Søket «{query}» ga ingen treff."));
+                            }
+                            st.search_results = results;
+                        });
+                    }
+                });
+                if st.search_pending {
+                    ui.spinner();
+                }
+                let mut follow_from_search: Option<String> = None;
+                for (symbol, name) in &st.search_results {
+                    if ui
+                        .button(RichText::new(format!("➕ {symbol} — {name}")).small())
+                        .clicked()
+                    {
+                        follow_from_search = Some(symbol.clone());
+                    }
+                }
+                if let Some(symbol) = follow_from_search {
+                    st.follow(&symbol);
+                    st.search_results.clear();
+                    self.search_query.clear();
+                    self.sync_watchlist(&st.watchlist);
+                }
                 ui.add_space(4.0);
-                egui::Grid::new("watchlist").striped(true).min_col_width(64.0).show(ui, |ui| {
+                let mut unfollow: Option<String> = None;
+                egui::Grid::new("watchlist").striped(true).min_col_width(58.0).show(ui, |ui| {
                     ui.label(RichText::new("Symbol").strong().color(GRAY));
                     ui.label(RichText::new("Siste").strong().color(GRAY));
                     ui.label(RichText::new("Endring").strong().color(GRAY));
                     ui.label(RichText::new("30 dager").strong().color(GRAY));
+                    ui.label("");
                     ui.end_row();
                     for q in st.quotes.values() {
                         let selected = self.selected.as_deref() == Some(q.symbol.as_str());
@@ -407,9 +584,21 @@ impl App {
                             _ => GRAY,
                         };
                         sparkline(ui, &format!("spark_{}", q.symbol), points, trend);
+                        if ui.small_button("🗑").on_hover_text("Fjern fra watchlisten").clicked() {
+                            unfollow = Some(q.symbol.clone());
+                        }
                         ui.end_row();
                     }
                 });
+                if let Some(symbol) = unfollow {
+                    st.watchlist.retain(|s| s != &symbol);
+                    st.quotes.remove(&symbol);
+                    if self.selected.as_deref() == Some(symbol.as_str()) {
+                        self.selected = st.quotes.keys().next().cloned();
+                    }
+                    st.log(format!("{symbol} fjernet fra watchlisten."));
+                    self.sync_watchlist(&st.watchlist);
+                }
                 if st.quotes.is_empty() {
                     ui.spinner();
                 }
@@ -1223,6 +1412,181 @@ impl App {
         });
     }
 
+    fn settings_view(&mut self, ctx: &egui::Context, st: &mut UiState) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().id_salt("innstillinger_scroll").show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.heading(RichText::new("⚙ Innstillinger").strong());
+                ui.small(format!(
+                    "Lagres til {} — de fleste endringer krever omstart av appen. Modus/megler endres i filen (med vilje).",
+                    self.config_path.display()
+                ));
+                ui.add_space(10.0);
+
+                let s = &mut self.settings;
+                section_heading(ui, "Generelt");
+                egui::Grid::new("innst_generelt").min_col_width(190.0).show(ui, |ui| {
+                    ui.label("Sekunder mellom kursoppdateringer");
+                    ui.add(egui::DragValue::new(&mut s.poll_secs).range(10..=300));
+                    ui.end_row();
+                    ui.label("Handle bare i børsens åpningstid");
+                    ui.checkbox(&mut s.market_hours_only, "(krypto handles alltid)");
+                    ui.end_row();
+                    ui.label("Kontovaluta");
+                    ui.text_edit_singleline(&mut s.base_currency);
+                    ui.end_row();
+                    ui.label("Startkapital (papirmodus)");
+                    ui.add(egui::DragValue::new(&mut s.starting_cash).range(1000.0..=100_000_000.0).speed(1000));
+                    ui.end_row();
+                    ui.label("Nullstill papirporteføljen ved neste start");
+                    ui.checkbox(&mut s.paper_reset, "");
+                    ui.end_row();
+                });
+
+                ui.add_space(10.0);
+                section_heading(ui, "Strategi (standard)");
+                egui::Grid::new("innst_strategi").min_col_width(190.0).show(ui, |ui| {
+                    ui.label("Strategi");
+                    egui::ComboBox::from_id_salt("innst_strateginavn")
+                        .selected_text(&s.strategy.name)
+                        .show_ui(ui, |ui| {
+                            for name in strategy::AVAILABLE {
+                                ui.selectable_value(&mut s.strategy.name, name.to_string(), name);
+                            }
+                        });
+                    ui.end_row();
+                    ui.label("Kjøp for beløp per ordre (kr; 0 = bruk antall)");
+                    ui.add(egui::DragValue::new(&mut s.strategy.order_value).range(0.0..=10_000_000.0).speed(500));
+                    ui.end_row();
+                    ui.label("Antall per ordre (når beløp = 0)");
+                    ui.add(egui::DragValue::new(&mut s.strategy.order_qty).range(1.0..=1_000_000.0));
+                    ui.end_row();
+                    ui.label("SMA rask / treg");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut s.strategy.fast).range(2..=100));
+                        ui.add(egui::DragValue::new(&mut s.strategy.slow).range(3..=400));
+                    });
+                    ui.end_row();
+                    ui.label("RSI periode / kjøp under / selg over");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut s.strategy.rsi_period).range(2..=50));
+                        ui.add(egui::DragValue::new(&mut s.strategy.rsi_buy_below).range(1.0..=50.0));
+                        ui.add(egui::DragValue::new(&mut s.strategy.rsi_sell_above).range(50.0..=99.0));
+                    });
+                    ui.end_row();
+                    ui.label("Momentum-vindu (dager)");
+                    ui.add(egui::DragValue::new(&mut s.strategy.momentum_window).range(3..=200));
+                    ui.end_row();
+                });
+
+                ui.add_space(10.0);
+                section_heading(ui, "Risiko");
+                egui::Grid::new("innst_risiko").min_col_width(190.0).show(ui, |ui| {
+                    ui.label("Maks verdi per ordre (kr)");
+                    ui.add(egui::DragValue::new(&mut s.risk.max_order_value).range(100.0..=100_000_000.0).speed(500));
+                    ui.end_row();
+                    ui.label("Maks posisjonsverdi per aksje (kr)");
+                    ui.add(egui::DragValue::new(&mut s.risk.max_position_value).range(100.0..=100_000_000.0).speed(500));
+                    ui.end_row();
+                    ui.label("Maks ordrer per minutt");
+                    ui.add(egui::DragValue::new(&mut s.risk.max_orders_per_min).range(1..=60));
+                    ui.end_row();
+                    ui.label("Stopp all handel ved tap på (kr)");
+                    ui.add(egui::DragValue::new(&mut s.risk.max_daily_loss).range(100.0..=100_000_000.0).speed(500));
+                    ui.end_row();
+                    ui.label("Stop-loss % fra kjøpskurs (0 = av)");
+                    ui.add(egui::DragValue::new(&mut s.risk.stop_loss_pct).range(0.0..=90.0).speed(0.5));
+                    ui.end_row();
+                    ui.label("Take-profit % (0 = av)");
+                    ui.add(egui::DragValue::new(&mut s.risk.take_profit_pct).range(0.0..=500.0).speed(0.5));
+                    ui.end_row();
+                    ui.label("Trailing stop % fra topp (0 = av)");
+                    ui.add(egui::DragValue::new(&mut s.risk.trailing_stop_pct).range(0.0..=90.0).speed(0.5));
+                    ui.end_row();
+                });
+
+                ui.add_space(10.0);
+                section_heading(ui, "Mobilvarsler");
+                egui::Grid::new("innst_varsler").min_col_width(190.0).show(ui, |ui| {
+                    ui.label("Varsler på");
+                    ui.checkbox(&mut s.notify.enabled, "");
+                    ui.end_row();
+                    ui.label("Tjeneste");
+                    egui::ComboBox::from_id_salt("innst_varseltjeneste")
+                        .selected_text(&s.notify.provider)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut s.notify.provider, "ntfy".into(), "ntfy");
+                            ui.selectable_value(&mut s.notify.provider, "telegram".into(), "telegram");
+                        });
+                    ui.end_row();
+                    ui.label("ntfy-emne (hemmelig navn)");
+                    ui.text_edit_singleline(&mut s.notify.ntfy_topic);
+                    ui.end_row();
+                    ui.label("Telegram chat-id");
+                    ui.text_edit_singleline(&mut s.notify.telegram_chat_id);
+                    ui.end_row();
+                });
+
+                // Autostart med Windows.
+                if std::env::consts::OS == "windows" {
+                    ui.add_space(10.0);
+                    section_heading(ui, "Windows");
+                    let mut auto = autostart_enabled();
+                    if ui.checkbox(&mut auto, "Start b-rs automatisk når Windows starter").changed() {
+                        match set_autostart(auto) {
+                            Ok(()) => st.log(if auto {
+                                "Autostart skrudd på."
+                            } else {
+                                "Autostart skrudd av."
+                            }),
+                            Err(e) => st.log(format!("Autostart feilet: {e:#}")),
+                        }
+                    }
+                }
+
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(RichText::new("💾 Lagre innstillinger").color(Color32::BLACK).strong()).fill(GREEN))
+                        .clicked()
+                    {
+                        self.settings_msg = Some(if self.settings.strategy.fast >= self.settings.strategy.slow {
+                            ("SMA rask må være mindre enn treg — ikke lagret.".to_string(), false)
+                        } else {
+                            match self.write_settings() {
+                                Ok(()) => {
+                                    st.log(format!("Innstillinger lagret til {}.", self.config_path.display()));
+                                    ("Lagret! Start appen på nytt for at alt skal tre i kraft.".to_string(), true)
+                                }
+                                Err(e) => (format!("Lagring feilet: {e:#}"), false),
+                            }
+                        });
+                    }
+                    if let Some((msg, ok)) = &self.settings_msg {
+                        ui.label(RichText::new(msg).color(if *ok { GREEN } else { RED }));
+                    }
+                });
+            });
+        });
+    }
+
+    fn help_view(&self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().id_salt("hjelp_scroll").show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.heading(RichText::new("❓ Hjelp").strong());
+                ui.small(format!("b-rs versjon {}", env!("CARGO_PKG_VERSION")));
+                ui.add_space(10.0);
+
+                for (title, body) in HELP_SECTIONS {
+                    section_heading(ui, title);
+                    ui.label(*body);
+                    ui.add_space(12.0);
+                }
+            });
+        });
+    }
+
     fn market_view(&mut self, ctx: &egui::Context, st: &mut UiState) {
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut to_follow: Vec<String> = Vec::new();
@@ -1270,8 +1634,11 @@ impl App {
                     &mut to_follow,
                 );
             });
-            for symbol in to_follow {
-                st.follow(&symbol);
+            if !to_follow.is_empty() {
+                for symbol in to_follow {
+                    st.follow(&symbol);
+                }
+                self.sync_watchlist(&st.watchlist);
             }
         });
     }
@@ -1416,6 +1783,86 @@ fn fmt_turnover(v: f64) -> String {
     } else {
         format!("{:.0} mill", v / 1e6)
     }
+}
+
+/// Hjelpetekstene — korte, norske forklaringer på alt i appen.
+const HELP_SECTIONS: &[(&str, &str)] = &[
+    (
+        "🚀 Kom i gang",
+        "Appen starter alltid i PAPIR-modus: boten handler med lekepenger og ekte kurser, helt risikofritt. \
+         Følg med noen dager, kjør backtester, og juster innstillingene før du i det hele tatt vurderer live-handel. \
+         Kursene kommer fra Yahoo Finance og er ca. 15 minutter forsinket — Oslo Børs er åpen 09:00–16:30.",
+    ),
+    (
+        "🧠 Strategiene",
+        "sma_cross: kjøper når snittkursen siste 5 dager krysser over snittet siste 20 (og selger ved kryss under) — følger trender.\n\
+         rsi: kjøper når aksjen er «oversolgt» (RSI under 30) og selger når den er «overkjøpt» (over 70) — satser på rekyl.\n\
+         momentum: kjøper når kursen bryter over det høyeste på 20 dager, selger ved brudd under det laveste — følger utbrudd.\n\n\
+         Bytt strategi i Strategi-panelet, overstyr per aksje, og test alltid med 🧪 Backtest eller ⚖ Sammenlign først.",
+    ),
+    (
+        "🛡️ Sikkerhetsnettene",
+        "Stop-loss: selger automatisk hvis en posisjon faller X % under kjøpskursen.\n\
+         Take-profit: sikrer gevinst ved +X %.\n\
+         Trailing stop: selger hvis kursen faller X % fra toppen etter kjøpet — låser inn gevinst.\n\
+         Tapsgrense: all handel stopper hvis porteføljen har tapt mer enn grensen.\n\
+         ⛔ KILL SWITCH (knappen øverst): stopper ALT umiddelbart og kansellerer åpne ordrer.",
+    ),
+    (
+        "📊 Begreper",
+        "SMA: gjennomsnittskurs over N dager — jevner ut støy.\n\
+         RSI: måler om en aksje er «overkjøpt» (nær 100) eller «oversolgt» (nær 0).\n\
+         Drawdown / verste fall: hvor dypt porteføljen sank fra toppen — mål på smerte underveis.\n\
+         Kjøp-og-hold: hva du hadde fått ved å bare kjøpe og vente — strategien bør slå dette.\n\
+         Urealisert: gevinst/tap på papiret. Realisert: låst inn ved salg — det er dette du skatter av.",
+    ),
+    (
+        "📱 Mobilvarsler (ntfy)",
+        "1. Installer «ntfy»-appen fra App Store/Google Play (gratis, ingen konto).\n\
+         2. Trykk + i appen og abonner på et hemmelig emnenavn du finner på, f.eks. bors-ola-73xk1.\n\
+         3. Skriv samme navn i Innstillinger → Mobilvarsler → ntfy-emne, slå på varsler, lagre og start appen på nytt.\n\
+         Du får da varsel ved hver handel, kill switch, tapsgrense, alarmer og oppstart.",
+    ),
+    (
+        "🗂 Filene appen bruker",
+        "config.toml — innstillingene (redigeres tryggest via ⚙-fanen).\n\
+         b-rs.db — databasen: portefølje, alle handler, alarmer. Dette er appens hukommelse!\n\
+         backups/ — daglig kopi av databasen, 14 beholdes.\n\
+         b-rs.log — logg over alt som skjer, for feilsøking.\n\
+         b-rs-realisert-gevinst.csv — skatterapporten (eksporteres fra 💳-fanen).",
+    ),
+    (
+        "⚠️ Viktig",
+        "Dette er et hobbyverktøy, ikke investeringsrådgivning. Automatisk handel kan gi raske tap. \
+         Ved live-handel via IBKR eller Revolut X er du selv ansvarlig for ordrer og skatt \
+         (de rapporterer ikke til Skatteetaten slik norske meglere gjør — bruk skatterapporten i appen).",
+    ),
+];
+
+/// Er autostart-snarveien på plass i Windows' oppstartsmappe?
+fn autostart_enabled() -> bool {
+    autostart_path().map(|p| p.exists()).unwrap_or(false)
+}
+
+fn autostart_path() -> Option<std::path::PathBuf> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    Some(
+        std::path::Path::new(&appdata)
+            .join(r"Microsoft\Windows\Start Menu\Programs\Startup")
+            .join("b-rs-gui.cmd"),
+    )
+}
+
+/// Slå autostart av/på ved å legge/fjerne et lite skript i oppstartsmappen.
+fn set_autostart(enable: bool) -> anyhow::Result<()> {
+    let path = autostart_path().ok_or_else(|| anyhow::anyhow!("fant ikke APPDATA-mappen"))?;
+    if enable {
+        let exe = std::env::current_exe()?;
+        std::fs::write(&path, format!("@echo off\r\nstart \"\" \"{}\"\r\n", exe.display()))?;
+    } else if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(())
 }
 
 /// Skriv hele transaksjonshistorikken som CSV; returnerer antall rader.

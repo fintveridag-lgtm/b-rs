@@ -1,0 +1,34 @@
+# Publiserer en offisiell utgivelse når en versjonstagg (v1.2.3) pushes:
+# bygger Windows-programfilene og legger dem ut under Releases på GitHub,
+# med automatisk endringslogg. Appen varsler brukeren om nye utgivelser.
+name: Utgivelse
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bygg release
+        run: cargo build --release
+      - name: Pakk zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/b-rs.exe, target/release/b-rs-gui.exe, config.example.toml dist/
+          Compress-Archive -Path dist/* -DestinationPath b-rs-windows.zip
+      - name: Publiser utgivelse
+        uses: softprops/action-gh-release@v2
+        with:
+          files: b-rs-windows.zip
+          generate_release_notes: true

@@ -11,12 +11,12 @@ use anyhow::Result;
 
 fn main() -> Result<()> {
     let config_arg = std::env::args().skip(1).find(|a| !a.starts_with("--"));
-    let mut cfg = b_rs::app::load_config(config_arg)?;
+    let (mut cfg, config_path) = b_rs::app::load_config(config_arg)?;
 
     if cfg.is_live() && !cfg.live_ok {
         // Ingen konsoll å spørre i — fall trygt tilbake til simulering.
         cfg.mode = "paper".into();
     }
 
-    b_rs::app::start(cfg, false)
+    b_rs::app::start_with_path(cfg, false, config_path)
 }

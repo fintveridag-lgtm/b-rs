@@ -9,7 +9,7 @@ fn main() -> Result<()> {
     let use_tui = args.iter().any(|a| a == "--tui");
     let config_arg = args.iter().find(|a| !a.starts_with("--")).cloned();
 
-    let cfg = b_rs::app::load_config(config_arg)?;
+    let (cfg, config_path) = b_rs::app::load_config(config_arg)?;
 
     // Sikkerhetsbarriere: live-handel må bekreftes eksplisitt i terminalen.
     if cfg.is_live() {
@@ -20,5 +20,5 @@ fn main() -> Result<()> {
         anyhow::ensure!(answer.trim() == "JA", "avbrutt — endre mode til \"paper\" for simulering");
     }
 
-    b_rs::app::start(cfg, use_tui)
+    b_rs::app::start_with_path(cfg, use_tui, config_path)
 }
