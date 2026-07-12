@@ -7,6 +7,7 @@ pub mod engine;
 pub mod gui;
 pub mod market;
 pub mod marketdata;
+pub mod morgan;
 pub mod nordnet;
 pub mod notify;
 pub mod pnl;

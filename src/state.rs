@@ -93,6 +93,10 @@ pub struct UiState {
     pub search_pending: bool,
     /// Ny versjon tilgjengelig: (versjon, nedlastingsside).
     pub update_available: Option<(String, String)>,
+    /// «Morgan» — AI-analysesjefen: ferdig rapport, feilmelding og ventestatus.
+    pub morgan_report: Option<String>,
+    pub morgan_error: Option<String>,
+    pub morgan_pending: bool,
 }
 
 /// Brukerdefinert kursalarm — varsler mobil/logg når nivået brytes.
@@ -158,6 +162,9 @@ impl UiState {
             search_results: Vec::new(),
             search_pending: false,
             update_available: None,
+            morgan_report: None,
+            morgan_error: None,
+            morgan_pending: false,
         }
     }
 
