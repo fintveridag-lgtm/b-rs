@@ -26,6 +26,25 @@ pub fn protective_exit(avg_price: f64, last: f64, stop_loss_pct: f64, take_profi
     None
 }
 
+/// Antall enheter for et kjøp. `order_value` (i kontovaluta) prioriteres —
+/// jevn risiko per posisjon uansett kurs; 0 betyr fast antall
+/// (`fallback_qty`). Børsnoterte kjøpes i hele aksjer (0 hvis ikke råd til
+/// én), krypto i brøkdeler (6 desimaler).
+pub fn order_size(order_value: f64, fallback_qty: f64, price: f64, fractional: bool) -> f64 {
+    if price <= 0.0 {
+        return 0.0;
+    }
+    if order_value <= 0.0 {
+        return fallback_qty;
+    }
+    let raw = order_value / price;
+    if fractional {
+        (raw * 1e6).floor() / 1e6
+    } else {
+        raw.floor().max(0.0)
+    }
+}
+
 /// Trailing stop: selg hvis kursen har falt `trail_pct` fra toppen (peak)
 /// siden kjøpet. 0 = avslått. Beskytter opparbeidet gevinst — en aksje
 /// kjøpt på 100 som steg til 140 selges rundt 128 ved 8 % trailing.
@@ -159,6 +178,19 @@ mod tests {
         // Avslått (0) utløser aldri; ukjent kostpris ignoreres trygt.
         assert!(protective_exit(100.0, 50.0, 0.0, 0.0).is_none());
         assert!(protective_exit(0.0, 50.0, 8.0, 10.0).is_none());
+    }
+
+    #[test]
+    fn order_sizing_by_value_and_fallback() {
+        // 10 000 kr / 342,50 → 29 hele aksjer.
+        assert_eq!(order_size(10_000.0, 10.0, 342.5, false), 29.0);
+        // Ikke råd til én aksje → 0 (engine hopper over).
+        assert_eq!(order_size(1_000.0, 10.0, 1_500.0, false), 0.0);
+        // Krypto: brøkdeler.
+        let btc = order_size(10_000.0, 1.0, 650_000.0, true);
+        assert!((btc - 0.015384).abs() < 1e-6);
+        // order_value = 0 → fast antall.
+        assert_eq!(order_size(0.0, 10.0, 342.5, false), 10.0);
     }
 
     #[test]

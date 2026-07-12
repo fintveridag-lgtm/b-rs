@@ -2,7 +2,8 @@ use crate::broker::Broker;
 use crate::config::Config;
 use crate::marketdata::Yahoo;
 use crate::notify::Notifier;
-use crate::risk::{protective_exit, trailing_exit, RiskManager, RiskVerdict};
+use crate::risk::{order_size, protective_exit, trailing_exit, RiskManager, RiskVerdict};
+use crate::types::Quote;
 use crate::state::{Flags, SharedState};
 use crate::store::Store;
 use crate::strategy::Strategy;
@@ -38,6 +39,12 @@ pub struct Engine {
     protected: HashSet<String>,
     /// Høyeste kurs per posisjon siden kjøp — grunnlag for trailing stop.
     peaks: HashMap<String, f64>,
+    /// Valutakurser til kontovaluta: valuta → (kurs, hentet-tidspunkt).
+    fx: HashMap<String, (f64, std::time::Instant)>,
+    /// Valutaer med feilet oppslag — logget én gang til det lykkes.
+    fx_failed: HashSet<String>,
+    /// Antall tikk på rad uten en eneste kurs — vakthund for datastrømmen.
+    fail_streak: u32,
 }
 
 impl Engine {
@@ -74,7 +81,56 @@ impl Engine {
             seeded: HashSet::new(),
             protected: HashSet::new(),
             peaks: HashMap::new(),
+            fx: HashMap::new(),
+            fx_failed: HashSet::new(),
+            fail_streak: 0,
         })
+    }
+
+    /// Kursen i kontovaluta, eller None hvis valutakursen mangler.
+    fn base_price(&self, q: &Quote) -> Option<f64> {
+        if q.currency.is_empty() || q.currency == self.cfg.base_currency {
+            return Some(q.last);
+        }
+        self.fx.get(&q.currency).map(|&(rate, _)| q.last * rate)
+    }
+
+    /// Hent/forny valutakurser for alle valutaer i dagens kurser.
+    /// Yahoo har valutapar som egne symboler, f.eks. "USDNOK=X".
+    async fn update_fx(&mut self, fresh: &[Quote]) {
+        let base = self.cfg.base_currency.clone();
+        let needed: HashSet<String> = fresh
+            .iter()
+            .map(|q| q.currency.clone())
+            .filter(|c| !c.is_empty() && *c != base)
+            .collect();
+        for currency in needed {
+            let is_fresh = self
+                .fx
+                .get(&currency)
+                .is_some_and(|(_, t)| t.elapsed() < Duration::from_secs(900));
+            if is_fresh {
+                continue;
+            }
+            match self.market.quote(&format!("{currency}{base}=X")).await {
+                Ok(q) if q.last > 0.0 => {
+                    let is_new = !self.fx.contains_key(&currency);
+                    self.fx.insert(currency.clone(), (q.last, std::time::Instant::now()));
+                    self.fx_failed.remove(&currency);
+                    self.state.lock().unwrap().fx_rates.insert(currency.clone(), q.last);
+                    if is_new {
+                        self.log(format!("Valutakurs {currency}/{base}: {:.3}", q.last));
+                    }
+                }
+                _ => {
+                    if self.fx_failed.insert(currency.clone()) {
+                        self.log(format!(
+                            "Fikk ikke valutakurs {currency}/{base} — hopper over handel i {currency}-instrumenter inntil videre."
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     /// Send push-varsel til mobil i bakgrunnen (blokkerer aldri tikken).
@@ -245,11 +301,28 @@ impl Engine {
         let mut fresh = Vec::new();
         for symbol in &symbols {
             match self.market.quote(symbol).await {
-                Ok(q) => {
-                    self.broker.on_quote(symbol, q.last).await;
-                    fresh.push(q);
-                }
+                Ok(q) => fresh.push(q),
                 Err(e) => self.log(format!("{symbol}: kursfeil: {e:#}")),
+            }
+        }
+
+        // Vakthund: rop hvis datastrømmen dør helt.
+        if fresh.is_empty() && !symbols.is_empty() {
+            self.fail_streak += 1;
+            if self.fail_streak == 5 {
+                let msg = "⚠ Mistet kursdata — fem runder på rad uten svar fra Yahoo.".to_string();
+                self.log(msg.clone());
+                self.notify(msg);
+            }
+        } else {
+            self.fail_streak = 0;
+        }
+
+        // Valutakurser, deretter marker posisjoner i kontovaluta.
+        self.update_fx(&fresh).await;
+        for q in &fresh {
+            if let Some(px) = self.base_price(q) {
+                self.broker.on_quote(&q.symbol, px).await;
             }
         }
 
@@ -312,7 +385,11 @@ impl Engine {
             if p.qty <= 0.0 {
                 continue;
             }
-            let last = fresh.iter().find(|q| q.symbol == p.symbol).map_or(p.last, |q| q.last);
+            let last = fresh
+                .iter()
+                .find(|q| q.symbol == p.symbol)
+                .and_then(|q| self.base_price(q))
+                .unwrap_or(p.last);
             let peak = self.peaks.entry(p.symbol.clone()).or_insert(p.avg_price.max(last));
             *peak = peak.max(last);
         }
@@ -326,13 +403,14 @@ impl Engine {
                     continue;
                 }
                 let Some(q) = fresh.iter().find(|q| q.symbol == p.symbol) else { continue };
-                let reason = protective_exit(p.avg_price, q.last, sl, tp).or_else(|| {
+                let Some(px) = self.base_price(q) else { continue };
+                let reason = protective_exit(p.avg_price, px, sl, tp).or_else(|| {
                     self.peaks
                         .get(&p.symbol)
-                        .and_then(|&peak| trailing_exit(peak, q.last, trail))
+                        .and_then(|&peak| trailing_exit(peak, px, trail))
                 });
                 if let Some(reason) = reason {
-                    exits.push((p.symbol.clone(), p.qty, q.last, reason));
+                    exits.push((p.symbol.clone(), p.qty, px, reason));
                 }
             }
             for (symbol, qty, price, reason) in exits {
@@ -358,13 +436,13 @@ impl Engine {
                 self.log(format!("Manuell ordre {side} {symbol} forkastet — kill switch er på."));
                 continue;
             }
-            let price = fresh
+            let quote = fresh
                 .iter()
                 .find(|q| q.symbol == symbol)
-                .map(|q| q.last)
-                .or_else(|| self.state.lock().unwrap().quotes.get(&symbol).map(|q| q.last));
-            let Some(price) = price else {
-                self.log(format!("Manuell ordre: ingen kurs for {symbol} ennå."));
+                .cloned()
+                .or_else(|| self.state.lock().unwrap().quotes.get(&symbol).cloned());
+            let Some(price) = quote.as_ref().and_then(|q| self.base_price(q)) else {
+                self.log(format!("Manuell ordre: mangler kurs eller valutakurs for {symbol}."));
                 continue;
             };
             let held = positions.iter().find(|p| p.symbol == symbol).map_or(0.0, |p| p.qty);
@@ -385,8 +463,19 @@ impl Engine {
         // 5) Strategisignaler → risikosjekk → ordre.
         if !self.flags.killed() && !self.flags.paused() {
             for q in &fresh {
+                // Handle bare når børsen er åpen (krypto er alltid åpen).
+                if self.cfg.market_hours_only
+                    && !crate::marketdata::is_trading_open(&q.symbol, Utc::now())
+                {
+                    continue;
+                }
+                // Strategien regner i instrumentets valuta; ordrer og
+                // risiko i kontovaluta.
                 let Some((side, strat_name)) = self.signal_for(&q.symbol, q.last) else {
                     continue;
+                };
+                let Some(px) = self.base_price(q) else {
+                    continue; // valutakurs mangler — allerede logget
                 };
                 let held = positions
                     .iter()
@@ -396,14 +485,26 @@ impl Engine {
                 // Kjøp bare når vi er flate, selg hele posisjonen — enkel
                 // og forutsigbar posisjonsstyring.
                 let qty = match side {
-                    Side::Buy if held <= 0.0 => self.cfg.strategy.order_qty,
+                    Side::Buy if held <= 0.0 => order_size(
+                        self.cfg.strategy.order_value,
+                        self.cfg.strategy.order_qty,
+                        px,
+                        crate::types::is_crypto(&q.symbol),
+                    ),
                     Side::Sell if held > 0.0 => held,
                     _ => continue,
                 };
+                if qty <= 0.0 {
+                    self.log(format!(
+                        "{}: order_value {:.0} rekker ikke til én enhet (kurs {px:.2}) — hopper over.",
+                        q.symbol, self.cfg.strategy.order_value
+                    ));
+                    continue;
+                }
 
-                let order_value = qty * q.last;
+                let order_value = qty * px;
                 let pos_value_after = match side {
-                    Side::Buy => (held + qty) * q.last,
+                    Side::Buy => (held + qty) * px,
                     Side::Sell => 0.0,
                 };
 
@@ -417,7 +518,7 @@ impl Engine {
                     }
                     RiskVerdict::Ok => {
                         let note = format!("signal fra {strat_name}");
-                        let _ = self.place(&q.symbol, side, qty, q.last, &note).await;
+                        let _ = self.place(&q.symbol, side, qty, px, &note).await;
                     }
                 }
             }

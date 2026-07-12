@@ -24,6 +24,13 @@ watchlist = ["EQNR.OL", "DNB.OL", "NHY.OL", "TEL.OL"]
 starting_cash = 100000.0
 paper_reset = false
 
+# Kontovaluta — utenlandske instrumenter (USD-krypto, EUR-ETF-er) regnes
+# automatisk om med live valutakurser, så porteføljen alltid er i én valuta.
+base_currency = "NOK"
+
+# Strategien handler bare i børsens åpningstid (krypto handles alltid).
+market_hours_only = true
+
 # SQLite-fil for ordre- og hendelseslogg.
 db_path = "b-rs.db"
 
@@ -33,7 +40,8 @@ db_path = "b-rs.db"
 name = "sma_cross"
 fast = 5             # sma_cross: rask SMA
 slow = 20            # sma_cross: treg SMA
-order_qty = 10       # antall aksjer per kjøp
+order_value = 10000.0 # kjøp for fast beløp (kr) per ordre — jevn risiko per posisjon
+order_qty = 10        # fast antall i stedet (brukes bare hvis order_value = 0)
 rsi_period = 14      # rsi: periode
 rsi_buy_below = 30.0 # rsi: kjøp under denne
 rsi_sell_above = 70.0 # rsi: selg over denne

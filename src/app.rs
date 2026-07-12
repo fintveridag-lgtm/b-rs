@@ -55,6 +55,8 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
     )));
     {
         let mut st = state.lock().unwrap();
+        st.log_path = prepare_log_file(&cfg.db_path);
+        st.poll_secs = cfg.poll_secs;
         st.sma_windows = (cfg.strategy.fast, cfg.strategy.slow);
         st.strategy_name = cfg.strategy.name.clone();
         st.strategy_cfg = cfg.strategy.clone();
@@ -121,6 +123,22 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
     flags.quit.store(true, std::sync::atomic::Ordering::Relaxed);
     rt.shutdown_timeout(std::time::Duration::from_secs(5));
     result
+}
+
+/// Loggfil ved siden av databasen; roteres til .old når den passerer 5 MB.
+fn prepare_log_file(db_path: &str) -> Option<String> {
+    let dir = std::path::Path::new(db_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    let path = dir.join("b-rs.log");
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 5_000_000 {
+            let _ = std::fs::rename(&path, dir.join("b-rs.log.old"));
+        }
+    }
+    Some(path.display().to_string())
 }
 
 /// Daglig sikkerhetskopi av databasen til backups/-mappen ved siden av den.

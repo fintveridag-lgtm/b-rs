@@ -278,7 +278,18 @@ impl App {
                 ui.label(RichText::new(format!("megler: {}", st.broker_name)).color(GRAY));
                 ui.separator();
                 if let Some(ts) = st.last_tick {
-                    ui.label(RichText::new(format!("oppdatert {}", ts.format("%H:%M:%S"))).color(GRAY));
+                    let age = (chrono::Utc::now() - ts).num_seconds();
+                    let stale_after = (st.poll_secs.max(15) * 4) as i64;
+                    if age > stale_after {
+                        // Vakthund: datastrømmen har stoppet.
+                        ui.label(
+                            RichText::new(format!("⚠ ingen ferske kurser på {age} s"))
+                                .color(RED)
+                                .strong(),
+                        );
+                    } else {
+                        ui.label(RichText::new(format!("oppdatert {}", ts.format("%H:%M:%S"))).color(GRAY));
+                    }
                 } else {
                     ui.spinner();
                     ui.label(RichText::new("henter kursdata …").color(GRAY));

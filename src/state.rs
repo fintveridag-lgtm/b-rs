@@ -80,6 +80,12 @@ pub struct UiState {
     /// Strategi-overstyring per symbol; symboler uten oppslag bruker
     /// standardstrategien (strategy_name).
     pub symbol_strategy: BTreeMap<String, String>,
+    /// Valutakurser mot kontovaluta, f.eks. "USD" → 10.52.
+    pub fx_rates: BTreeMap<String, f64>,
+    /// Tikk-intervallet fra konfigen — brukes av vakthund-indikatoren.
+    pub poll_secs: u64,
+    /// Loggfil — alle hendelser speiles hit for feilsøking i ettertid.
+    pub log_path: Option<String>,
 }
 
 /// Brukerdefinert kursalarm — varsler mobil/logg når nivået brytes.
@@ -138,6 +144,9 @@ impl UiState {
             calendar_note: None,
             alarms: Vec::new(),
             symbol_strategy: BTreeMap::new(),
+            fx_rates: BTreeMap::new(),
+            poll_secs: 15,
+            log_path: None,
         }
     }
 
@@ -162,7 +171,16 @@ impl UiState {
     }
 
     pub fn log(&mut self, msg: impl Into<String>) {
-        self.logs.push_front((Utc::now(), msg.into()));
+        let msg = msg.into();
+        let now = Utc::now();
+        // Speil til loggfil så hendelser kan feilsøkes etter at appen er lukket.
+        if let Some(path) = &self.log_path {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(f, "{} {msg}", now.format("%Y-%m-%d %H:%M:%S"));
+            }
+        }
+        self.logs.push_front((now, msg));
         self.logs.truncate(200);
     }
 

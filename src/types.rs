@@ -41,7 +41,16 @@ pub struct Quote {
     pub symbol: String,
     pub last: f64,
     pub prev_close: f64,
+    /// Instrumentets valuta fra Yahoo ("NOK", "USD", …); tom = ukjent,
+    /// behandles som kontovaluta.
+    pub currency: String,
     pub ts: DateTime<Utc>,
+}
+
+/// Kryptopar ("BTC-USD") kjennetegnes av bindestrek uten børssuffiks —
+/// de handles døgnet rundt og i brøkdeler.
+pub fn is_crypto(symbol: &str) -> bool {
+    symbol.contains('-') && !symbol.contains('.')
 }
 
 impl Quote {

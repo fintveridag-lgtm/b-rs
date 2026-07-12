@@ -1,0 +1,30 @@
+# Bygger ferdige Windows-programfiler på GitHub, så du slipper å kompilere
+# lokalt: gå til Actions-fanen → siste kjøring → last ned "b-rs-windows".
+name: Windows-bygg
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bygg release
+        run: cargo build --release
+      - name: Last opp programfiler
+        uses: actions/upload-artifact@v4
+        with:
+          name: b-rs-windows
+          retention-days: 14
+          path: |
+            target/release/b-rs.exe
+            target/release/b-rs-gui.exe
+            config.example.toml

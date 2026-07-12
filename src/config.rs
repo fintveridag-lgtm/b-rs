@@ -21,6 +21,12 @@ pub struct Config {
     /// ellers gjenopprettes den fra databasen ved oppstart.
     #[serde(default)]
     pub paper_reset: bool,
+    /// Kontovaluta — alle posisjoner og all risiko regnes om hit.
+    #[serde(default = "default_base_currency")]
+    pub base_currency: String,
+    /// Strategien handler bare i børsens åpningstid (krypto unntas).
+    #[serde(default = "default_true")]
+    pub market_hours_only: bool,
     #[serde(default = "default_db_path")]
     pub db_path: String,
     /// Kreves av den konsoll-løse GUI-varianten (b-rs-gui) for live-handel,
@@ -100,7 +106,11 @@ pub struct StrategyCfg {
     /// Vindu for treg glidende snitt.
     #[serde(default = "default_slow")]
     pub slow: usize,
-    /// Antall aksjer per kjøpsordre.
+    /// Kjøp for et fast BELØP (i kontovaluta) per ordre — gir jevn risiko
+    /// per posisjon uansett aksjekurs. 0 = bruk order_qty i stedet.
+    #[serde(default)]
+    pub order_value: f64,
+    /// Antall aksjer per kjøpsordre (brukes bare når order_value = 0).
     #[serde(default = "default_order_qty")]
     pub order_qty: f64,
     /// RSI-strategien: periode og terskler.
@@ -119,6 +129,7 @@ impl Default for StrategyCfg {
     fn default() -> Self {
         Self {
             name: default_strategy_name(),
+            order_value: 0.0,
             fast: default_fast(),
             slow: default_slow(),
             order_qty: default_order_qty(),
@@ -219,6 +230,7 @@ impl Default for NordnetCfg {
 }
 
 fn default_mode() -> String { "paper".into() }
+fn default_base_currency() -> String { "NOK".into() }
 fn default_broker() -> String { "paper".into() }
 fn default_poll_secs() -> u64 { 15 }
 fn default_starting_cash() -> f64 { 100_000.0 }

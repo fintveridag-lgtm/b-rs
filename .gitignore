@@ -3,4 +3,6 @@ config.toml
 *.db
 backups/
 *.csv
+*.log
+*.log.old
 .env

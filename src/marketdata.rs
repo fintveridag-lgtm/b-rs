@@ -140,12 +140,43 @@ fn parse_quote(symbol: &str, result: &Value) -> Result<Quote> {
         .or_else(|| meta.get("previousClose"))
         .and_then(Value::as_f64)
         .unwrap_or(last);
+    let currency = meta
+        .get("currency")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     Ok(Quote {
         symbol: symbol.to_string(),
         last,
         prev_close,
+        currency,
         ts: Utc::now(),
     })
+}
+
+/// Er børsen dette symbolet handles på åpen akkurat nå? Krypto er alltid
+/// åpent; ellers brukes børssuffikset og lokal børstid (man–fre).
+pub fn is_trading_open(symbol: &str, now: chrono::DateTime<Utc>) -> bool {
+    use chrono::{Datelike, Timelike, Weekday};
+    if crate::types::is_crypto(symbol) {
+        return true;
+    }
+    let (tz, open, close): (chrono_tz::Tz, (u32, u32), (u32, u32)) =
+        match symbol.rsplit_once('.').map(|(_, suffix)| suffix) {
+            Some("OL") => (chrono_tz::Europe::Oslo, (9, 0), (16, 30)),
+            Some("DE") => (chrono_tz::Europe::Berlin, (9, 0), (17, 30)),
+            Some("L") => (chrono_tz::Europe::London, (8, 0), (16, 30)),
+            Some("ST") => (chrono_tz::Europe::Stockholm, (9, 0), (17, 30)),
+            Some("CO") => (chrono_tz::Europe::Copenhagen, (9, 0), (17, 0)),
+            // Uten suffiks: amerikansk børs.
+            _ => (chrono_tz::America::New_York, (9, 30), (16, 0)),
+        };
+    let local = now.with_timezone(&tz);
+    if matches!(local.weekday(), Weekday::Sat | Weekday::Sun) {
+        return false;
+    }
+    let minutes = local.hour() * 60 + local.minute();
+    minutes >= open.0 * 60 + open.1 && minutes < close.0 * 60 + close.1
 }
 
 fn parse_history(symbol: &str, result: &Value) -> Result<Vec<Candle>> {
@@ -221,6 +252,33 @@ mod tests {
     fn missing_price_is_an_error() {
         let result = json!({ "meta": {} });
         assert!(parse_quote("X", &result).is_err());
+    }
+
+    #[test]
+    fn trading_hours_respect_exchange_and_weekends() {
+        use chrono::TimeZone;
+        // Onsdag 15. juli 2026 kl. 08:00 UTC = 10:00 i Oslo → åpent.
+        let wed_open = chrono::Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap();
+        assert!(is_trading_open("EQNR.OL", wed_open));
+        // Samme onsdag kl. 20:00 UTC → stengt i Oslo.
+        let wed_evening = chrono::Utc.with_ymd_and_hms(2026, 7, 15, 20, 0, 0).unwrap();
+        assert!(!is_trading_open("EQNR.OL", wed_evening));
+        // Lørdag → stengt.
+        let saturday = chrono::Utc.with_ymd_and_hms(2026, 7, 18, 10, 0, 0).unwrap();
+        assert!(!is_trading_open("EQNR.OL", saturday));
+        // Krypto er alltid åpent — også lørdag kveld.
+        assert!(is_trading_open("BTC-USD", saturday));
+        // USA er stengt når Oslo har formiddag.
+        assert!(!is_trading_open("AAPL", wed_open));
+    }
+
+    #[test]
+    fn quote_parses_currency() {
+        let result = json!({
+            "meta": { "regularMarketPrice": 61000.0, "chartPreviousClose": 60000.0, "currency": "USD" }
+        });
+        let q = parse_quote("BTC-USD", &result).unwrap();
+        assert_eq!(q.currency, "USD");
     }
 
     #[test]
