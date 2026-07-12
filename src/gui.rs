@@ -21,10 +21,10 @@ const RED: Color32 = Color32::from_rgb(240, 82, 82);
 const YELLOW: Color32 = Color32::from_rgb(250, 204, 21);
 const BLUE: Color32 = Color32::from_rgb(96, 165, 250);
 const GRAY: Color32 = Color32::from_rgb(140, 150, 165);
-const BG_PANEL: Color32 = Color32::from_rgb(10, 13, 20);
-const BG_DEEP: Color32 = Color32::from_rgb(5, 7, 12);
-const BG_CARD: Color32 = Color32::from_rgb(16, 20, 29);
-const BORDER: Color32 = Color32::from_rgb(30, 38, 51);
+const BG_PANEL: Color32 = Color32::from_rgb(4, 6, 10);
+const BG_DEEP: Color32 = Color32::from_rgb(1, 2, 4);
+const BG_CARD: Color32 = Color32::from_rgb(9, 12, 18);
+const BORDER: Color32 = Color32::from_rgb(22, 28, 38);
 
 #[derive(Clone, Copy, PartialEq)]
 enum View {
@@ -197,7 +197,7 @@ fn apply_theme(ctx: &egui::Context) {
     visuals.widgets.noninteractive.bg_stroke.color = BORDER;
     // Grønn glød ved hover/klikk.
     visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, GREEN);
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(22, 30, 42);
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(15, 21, 30);
     visuals.widgets.active.bg_stroke = egui::Stroke::new(1.2, GREEN);
     ctx.set_visuals(visuals);
 
