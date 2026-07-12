@@ -44,6 +44,10 @@ impl Store {
                 level REAL NOT NULL,
                 above INTEGER NOT NULL,
                 triggered INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS symbol_strategy (
+                symbol TEXT PRIMARY KEY,
+                strategy TEXT NOT NULL
             );",
         )?;
         Ok(Self { conn: Mutex::new(conn) })
@@ -154,6 +158,31 @@ impl Store {
         Ok(alarms)
     }
 
+    /// Lagre strategi-per-aksje-valgene (erstatter det som ligger der).
+    pub fn save_symbol_strategies(&self, map: &std::collections::BTreeMap<String, String>) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM symbol_strategy", [])?;
+        for (symbol, strategy) in map {
+            tx.execute(
+                "INSERT INTO symbol_strategy (symbol, strategy) VALUES (?1, ?2)",
+                params![symbol, strategy],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn load_symbol_strategies(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT symbol, strategy FROM symbol_strategy")?;
+        let map = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(map)
+    }
+
     /// Alle FYLTE ordrer i kronologisk rekkefølge — grunnlag for
     /// FIFO-beregning av realisert gevinst/tap.
     pub fn fills_chronological(&self) -> Result<Vec<Fill>> {
@@ -231,6 +260,21 @@ mod tests {
         assert_eq!(txs[0].symbol, "EQNR.OL");
         assert_eq!(txs[0].side, "KJØP");
         assert_eq!(txs[0].broker, "paper");
+    }
+
+    #[test]
+    fn symbol_strategy_roundtrip() {
+        let store = Store::open(":memory:").unwrap();
+        assert!(store.load_symbol_strategies().unwrap().is_empty());
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("FRO.OL".to_string(), "momentum".to_string());
+        map.insert("TEL.OL".to_string(), "rsi".to_string());
+        store.save_symbol_strategies(&map).unwrap();
+        assert_eq!(store.load_symbol_strategies().unwrap(), map);
+        // Fjerning lagres også.
+        map.remove("TEL.OL");
+        store.save_symbol_strategies(&map).unwrap();
+        assert_eq!(store.load_symbol_strategies().unwrap().len(), 1);
     }
 
     #[test]

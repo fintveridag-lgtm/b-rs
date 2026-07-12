@@ -8,8 +8,13 @@ const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, lik
 /// Gratis kursdata fra Yahoo Finance. Oslo Børs-tickere har suffiks ".OL",
 /// f.eks. "EQNR.OL". Data er forsinket (~15 min) — greit til papirhandel og
 /// rolige strategier, ikke til høyfrekvent handel.
+///
+/// Alle kall går gjennom en høflighetskø (minst 250 ms mellom forespørsler)
+/// med ett gjenforsøk ved 429/serverfeil, så en stor watchlist ikke får
+/// oss midlertidig blokkert hos Yahoo.
 pub struct Yahoo {
     client: reqwest::Client,
+    gate: tokio::sync::Mutex<std::time::Instant>,
 }
 
 impl Yahoo {
@@ -18,15 +23,37 @@ impl Yahoo {
             .user_agent(UA)
             .timeout(std::time::Duration::from_secs(15))
             .build()?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            gate: tokio::sync::Mutex::new(std::time::Instant::now()),
+        })
+    }
+
+    /// Felles inngang for alle Yahoo-kall: kø + backoff.
+    async fn get_json(&self, url: &str) -> Result<Value> {
+        {
+            let mut last = self.gate.lock().await;
+            let min_gap = std::time::Duration::from_millis(250);
+            let elapsed = last.elapsed();
+            if elapsed < min_gap {
+                tokio::time::sleep(min_gap - elapsed).await;
+            }
+            *last = std::time::Instant::now();
+        }
+        let mut resp = self.client.get(url).send().await?;
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS || resp.status().is_server_error() {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            resp = self.client.get(url).send().await?;
+        }
+        let resp = resp.error_for_status()?;
+        Ok(resp.json().await?)
     }
 
     async fn chart(&self, symbol: &str, range: &str, interval: &str) -> Result<Value> {
         let url = format!(
             "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={range}&interval={interval}"
         );
-        let resp = self.client.get(&url).send().await?.error_for_status()?;
-        let v: Value = resp.json().await?;
+        let v = self.get_json(&url).await?;
         if let Some(err) = v.pointer("/chart/error").filter(|e| !e.is_null()) {
             anyhow::bail!("Yahoo-feil for {symbol}: {err}");
         }
@@ -79,8 +106,7 @@ impl Yahoo {
         let url = format!(
             "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1y&interval=1d&events=div"
         );
-        let resp = self.client.get(&url).send().await?.error_for_status()?;
-        let v: Value = resp.json().await?;
+        let v = self.get_json(&url).await?;
         let result = v
             .pointer("/chart/result/0")
             .cloned()

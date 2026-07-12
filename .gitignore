@@ -1,4 +1,6 @@
 /target
 config.toml
 *.db
+backups/
+*.csv
 .env

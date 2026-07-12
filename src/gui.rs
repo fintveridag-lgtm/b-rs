@@ -431,19 +431,26 @@ impl App {
                             .get(&sel)
                             .cloned()
                             .unwrap_or_else(|| "standard".to_string());
+                        let mut changed = false;
                         egui::ComboBox::from_id_salt("symbolstrategi")
                             .selected_text(&current)
                             .show_ui(ui, |ui| {
-                                if ui.selectable_label(current == "standard", "standard").clicked() {
-                                    st.symbol_strategy.remove(&sel);
+                                if ui.selectable_label(current == "standard", "standard").clicked()
+                                    && st.symbol_strategy.remove(&sel).is_some()
+                                {
+                                    changed = true;
                                 }
                                 for name in strategy::AVAILABLE {
                                     if ui.selectable_label(current == name, name).clicked() {
                                         st.symbol_strategy.insert(sel.clone(), name.to_string());
                                         st.log(format!("{sel} bruker nå strategien {name}."));
+                                        changed = true;
                                     }
                                 }
                             });
+                        if changed {
+                            let _ = self.store.save_symbol_strategies(&st.symbol_strategy);
+                        }
                     });
                 }
                 ui.horizontal(|ui| {

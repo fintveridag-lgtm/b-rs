@@ -20,6 +20,9 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
         .enable_all()
         .build()?;
 
+    // Sikkerhetskopi før databasen åpnes — én per dag, 14 beholdes.
+    let backup_msg = backup_database(&cfg.db_path);
+
     let store = Arc::new(store::Store::open(&cfg.db_path)?);
 
     let broker: Arc<dyn Broker> = match (cfg.is_live(), cfg.broker.as_str()) {
@@ -61,6 +64,10 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
         // Transaksjonshistorikk og alarmer fra tidligere økter.
         st.transactions = store.recent_orders(500).unwrap_or_default();
         st.alarms = store.load_alarms().unwrap_or_default();
+        st.symbol_strategy = store.load_symbol_strategies().unwrap_or_default();
+        if let Some(msg) = backup_msg {
+            st.log(msg);
+        }
         // Fortell brukeren om papirporteføljen ble gjenopprettet.
         if !cfg.is_live() || cfg.broker == "paper" {
             if cfg.paper_reset {
@@ -114,6 +121,37 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
     flags.quit.store(true, std::sync::atomic::Ordering::Relaxed);
     rt.shutdown_timeout(std::time::Duration::from_secs(5));
     result
+}
+
+/// Daglig sikkerhetskopi av databasen til backups/-mappen ved siden av den.
+/// Databasen er appens hukommelse: portefølje, historikk og skattegrunnlag.
+fn backup_database(db_path: &str) -> Option<String> {
+    let src = std::path::Path::new(db_path);
+    if !src.exists() {
+        return None;
+    }
+    let dir = src.parent().unwrap_or(std::path::Path::new(".")).join("backups");
+    std::fs::create_dir_all(&dir).ok()?;
+    let stem = src.file_stem()?.to_string_lossy().to_string();
+    let dest = dir.join(format!("{stem}-{}.db", chrono::Local::now().format("%Y-%m-%d")));
+    if dest.exists() {
+        return None; // dagens kopi finnes allerede
+    }
+    std::fs::copy(src, &dest).ok()?;
+
+    // Behold bare de 14 nyeste kopiene.
+    let mut backups: Vec<_> = std::fs::read_dir(&dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "db"))
+        .collect();
+    backups.sort();
+    while backups.len() > 14 {
+        let oldest = backups.remove(0);
+        let _ = std::fs::remove_file(oldest);
+    }
+
+    Some(format!("Sikkerhetskopi av databasen: {}", dest.display()))
 }
 
 /// Finn konfigurasjonen, i prioritert rekkefølge:
