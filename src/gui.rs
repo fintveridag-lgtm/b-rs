@@ -6,7 +6,10 @@ use crate::strategy;
 use crate::types::Side;
 use anyhow::Result;
 use eframe::egui::{self, Color32, RichText};
-use egui_plot::{BoxElem, BoxPlot, BoxSpread, Legend, Line, Plot, PlotPoints};
+use egui_plot::{
+    BoxElem, BoxPlot, BoxSpread, HLine, Legend, Line, LineStyle, MarkerShape, Plot, PlotPoints,
+    Points,
+};
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -55,6 +58,16 @@ impl OrderFilter {
             OrderFilter::Kansellerte => matches!(status, Cancelled | Rejected),
         }
     }
+}
+
+/// En ordre som venter på brukerens bekreftelse — vises som klartekst-kort
+/// («Du kjøper 14 stk EQNR for ca. 4 928 kr …») før den legges i køen.
+struct PendingOrder {
+    symbol: String,
+    side: Side,
+    qty: f64,
+    /// Anslått kurs per aksje i kontovaluta (kroner).
+    price_nok: f64,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -126,6 +139,11 @@ pub fn run(deps: GuiDeps) -> Result<()> {
         range: ChartRange::ThreeMonths,
         style: ChartStyle::Line,
         trade_qty: 10.0,
+        trade_amount_kr: 5_000.0,
+        trade_use_kr: true,
+        pending_order: None,
+        simple_chart: false,
+        fills_cache: (usize::MAX, Vec::new()),
         strategy_choice: String::new(),
         backtest: None,
         compare: None,
@@ -249,6 +267,16 @@ struct App {
     range: ChartRange,
     style: ChartStyle,
     trade_qty: f64,
+    /// Hurtighandel i kroner: beløp og om kronemodus er valgt (standard).
+    trade_amount_kr: f64,
+    trade_use_kr: bool,
+    /// Ordre som venter på bekreftelse i klartekst-kortet.
+    pending_order: Option<PendingOrder>,
+    /// Enkel graf: bare kurslinjen, uten SMA og candlesticks.
+    simple_chart: bool,
+    /// (antall transaksjoner da cachen ble bygget, fylte ordrer som
+    /// (symbol, unixtid, kjøp?, kurs)) — kjøps-/salgsmerkene i grafen.
+    fills_cache: (usize, Vec<(String, f64, bool, f64)>),
     strategy_choice: String,
     backtest: Option<std::result::Result<BacktestResult, String>>,
     /// Resultat av «sammenlign strategier» — én rad per strategi.
@@ -354,6 +382,25 @@ impl App {
         }
         &self.realized_cache.1
     }
+
+    /// Fylte ordrer som (symbol, unixtid, kjøp?, kurs) — merkene i grafen.
+    /// Bygges på nytt når transaksjonslisten endrer seg.
+    fn chart_fills(&mut self, st: &UiState) -> &[(String, f64, bool, f64)] {
+        let marker = st.transactions.len();
+        if self.fills_cache.0 != marker {
+            let fills = self.store.fills_chronological().unwrap_or_default();
+            let parsed = fills
+                .iter()
+                .filter_map(|f| {
+                    chrono::DateTime::parse_from_rfc3339(&f.ts_rfc3339)
+                        .ok()
+                        .map(|dt| (f.symbol.clone(), dt.timestamp() as f64, f.is_buy, f.price))
+                })
+                .collect();
+            self.fills_cache = (marker, parsed);
+        }
+        &self.fills_cache.1
+    }
 }
 
 impl eframe::App for App {
@@ -388,6 +435,7 @@ impl eframe::App for App {
             View::Hjelp => self.help_view(ctx),
         }
 
+        self.confirm_order_dialog(ctx, &mut st);
         self.draw_toasts(ctx, &mut st);
         self.handle_close_request(ctx);
     }
@@ -784,33 +832,105 @@ impl App {
                 ui.separator();
                 section_heading(ui, "⚡ Hurtighandel");
                 if let Some(symbol) = self.selected.clone() {
+                    let price_nok = st
+                        .quotes
+                        .get(&symbol)
+                        .map(|q| to_nok(st, &q.currency, q.last))
+                        .unwrap_or(0.0);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&symbol).strong());
-                        ui.label("antall:");
-                        ui.add(
-                            egui::DragValue::new(&mut self.trade_qty)
-                                .range(1.0..=1_000_000.0)
-                                .speed(1)
-                                .max_decimals(0),
-                        );
+                        ui.selectable_value(&mut self.trade_use_kr, true, "💰 kroner")
+                            .on_hover_text("Skriv hvor mye du vil handle for — appen regner ut antallet.");
+                        ui.selectable_value(&mut self.trade_use_kr, false, "antall stk");
                     });
+                    if self.trade_use_kr {
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut self.trade_amount_kr)
+                                    .range(100.0..=100_000_000.0)
+                                    .speed(100)
+                                    .max_decimals(0)
+                                    .suffix(" kr"),
+                            );
+                            for beløp in [1_000.0, 5_000.0, 10_000.0] {
+                                if ui.small_button(fmt_thousands(beløp)).clicked() {
+                                    self.trade_amount_kr = beløp;
+                                }
+                            }
+                            if ui
+                                .small_button("Maks")
+                                .on_hover_text("Alle tilgjengelige kontanter")
+                                .clicked()
+                            {
+                                self.trade_amount_kr = st.cash.floor().max(0.0);
+                            }
+                        });
+                        if price_nok > 0.0 {
+                            let antall = kjopbart_antall(&symbol, self.trade_amount_kr, price_nok);
+                            if antall > 0.0 {
+                                ui.small(format!(
+                                    "≈ {} stk til ca. {price_nok:.2} kr",
+                                    fmt_qty(antall)
+                                ));
+                            } else {
+                                ui.small(
+                                    RichText::new(format!(
+                                        "Beløpet holder ikke til én aksje (kurs ca. {price_nok:.0} kr)."
+                                    ))
+                                    .color(YELLOW),
+                                );
+                            }
+                        }
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label("antall:");
+                            ui.add(
+                                egui::DragValue::new(&mut self.trade_qty)
+                                    .range(1.0..=1_000_000.0)
+                                    .speed(1)
+                                    .max_decimals(0),
+                            );
+                        });
+                    }
                     ui.horizontal(|ui| {
+                        let qty = if self.trade_use_kr {
+                            if price_nok > 0.0 {
+                                kjopbart_antall(&symbol, self.trade_amount_kr, price_nok)
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            self.trade_qty
+                        };
+                        let klar = qty > 0.0 && price_nok > 0.0;
                         if ui
-                            .add(egui::Button::new(RichText::new("KJØP").color(Color32::BLACK).strong()).fill(GREEN))
+                            .add_enabled(
+                                klar,
+                                egui::Button::new(RichText::new("KJØP").color(Color32::BLACK).strong()).fill(GREEN),
+                            )
                             .clicked()
                         {
-                            st.manual_orders.push_back((symbol.clone(), Side::Buy, self.trade_qty));
-                            st.log(format!("Manuell KJØP {symbol} x{:.0} lagt i kø.", self.trade_qty));
+                            self.pending_order =
+                                Some(PendingOrder { symbol: symbol.clone(), side: Side::Buy, qty, price_nok });
                         }
                         if ui
-                            .add(egui::Button::new(RichText::new("SELG").color(Color32::WHITE).strong()).fill(RED))
+                            .add_enabled(
+                                klar,
+                                egui::Button::new(RichText::new("SELG").color(Color32::WHITE).strong()).fill(RED),
+                            )
                             .clicked()
                         {
-                            st.manual_orders.push_back((symbol.clone(), Side::Sell, self.trade_qty));
-                            st.log(format!("Manuell SELG {symbol} x{:.0} lagt i kø.", self.trade_qty));
+                            // I kronemodus: ikke selg mer enn du eier.
+                            let eid = st.positions.iter().find(|p| p.symbol == symbol).map(|p| p.qty);
+                            let qty = match (self.trade_use_kr, eid) {
+                                (true, Some(e)) => qty.min(e),
+                                _ => qty,
+                            };
+                            self.pending_order =
+                                Some(PendingOrder { symbol: symbol.clone(), side: Side::Sell, qty, price_nok });
                         }
                     });
-                    ui.small("Utføres på neste tikk, gjennom risikoreglene.");
+                    ui.small("Du får en oppsummering i klartekst før ordren sendes.");
                 } else {
                     ui.small("Velg et symbol i watchlisten først.");
                 }
@@ -888,19 +1008,51 @@ impl App {
                 if st.positions.is_empty() && st.nordnet_positions.is_empty() {
                     ui.small("Ingen posisjoner ennå.");
                 }
+                let mut sell_request: Option<PendingOrder> = None;
                 egui::Grid::new("posisjoner").striped(true).min_col_width(58.0).show(ui, |ui| {
                     ui.label(RichText::new("Symbol").strong().color(GRAY));
                     ui.label(RichText::new("Antall").strong().color(GRAY));
                     ui.label(RichText::new("Verdi").strong().color(GRAY));
                     ui.label(RichText::new("Urealisert").strong().color(GRAY));
+                    ui.label("");
                     ui.end_row();
                     for p in &st.positions {
                         ui.label(&p.symbol);
-                        ui.label(format!("{:.0}", p.qty));
+                        ui.label(fmt_qty(p.qty));
                         ui.label(fmt_thousands(p.market_value()));
                         let u = p.unrealized();
                         let color = if u >= 0.0 { GREEN } else { RED };
                         ui.label(RichText::new(format!("{u:+.0}")).color(color));
+                        ui.horizontal(|ui| {
+                            let price_nok = st
+                                .quotes
+                                .get(&p.symbol)
+                                .map(|q| to_nok(st, &q.currency, q.last))
+                                .unwrap_or(p.last);
+                            if ui.small_button("Selg alt").clicked() {
+                                sell_request = Some(PendingOrder {
+                                    symbol: p.symbol.clone(),
+                                    side: Side::Sell,
+                                    qty: p.qty,
+                                    price_nok,
+                                });
+                            }
+                            let halv = if crate::types::is_crypto(&p.symbol) {
+                                p.qty / 2.0
+                            } else {
+                                (p.qty / 2.0).floor()
+                            };
+                            if halv > 0.0
+                                && ui.small_button("½").on_hover_text("Selg halvparten").clicked()
+                            {
+                                sell_request = Some(PendingOrder {
+                                    symbol: p.symbol.clone(),
+                                    side: Side::Sell,
+                                    qty: halv,
+                                    price_nok,
+                                });
+                            }
+                        });
                         ui.end_row();
                     }
                     for p in &st.nordnet_positions {
@@ -912,11 +1064,160 @@ impl App {
                         ui.end_row();
                     }
                 });
+                if let Some(req) = sell_request {
+                    self.pending_order = Some(req);
+                }
                 if st.nordnet_enabled {
                     ui.small("[NN] = Nordnet-portefølje (kun lesing).");
                 }
                 });
             });
+    }
+
+    /// Bekreftelseskortet: oppsummerer ordren i klartekst («Du kjøper 14 stk
+    /// EQNR for ca. 4 928 kr …») med advarsler, før den legges i køen.
+    fn confirm_order_dialog(&mut self, ctx: &egui::Context, st: &mut UiState) {
+        let Some(po) = &self.pending_order else { return };
+        let (symbol, side, qty, price) = (po.symbol.clone(), po.side, po.qty, po.price_nok);
+        let sum = qty * price;
+        let mut close = false;
+        let mut send = false;
+
+        egui::Window::new(match side {
+            Side::Buy => "🟢 Bekreft kjøp",
+            Side::Sell => "🔴 Bekreft salg",
+        })
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(340.0);
+            ui.add_space(4.0);
+            let verb = match side {
+                Side::Buy => "kjøper",
+                Side::Sell => "selger",
+            };
+            ui.label(
+                RichText::new(format!(
+                    "Du {verb} {} stk {symbol} til ca. {price:.2} kr",
+                    fmt_qty(qty)
+                ))
+                .size(16.0)
+                .strong(),
+            );
+            ui.label(
+                RichText::new(format!("Totalt: ≈ {} kr", fmt_thousands(sum)))
+                    .size(20.0)
+                    .strong()
+                    .color(if side == Side::Buy { GREEN } else { RED }),
+            );
+            ui.add_space(6.0);
+
+            let posisjon = st.positions.iter().find(|p| p.symbol == symbol);
+            match side {
+                Side::Buy => {
+                    ui.label(format!(
+                        "Kontanter etterpå: ≈ {} kr",
+                        fmt_thousands(st.cash - sum)
+                    ));
+                    // Hvor stor bit av porteføljen blir denne aksjen?
+                    if st.equity > 0.0 {
+                        let eksisterende = posisjon
+                            .map(|p| {
+                                let kurs_nok = st
+                                    .quotes
+                                    .get(&p.symbol)
+                                    .map(|q| to_nok(st, &q.currency, q.last))
+                                    .unwrap_or(p.last);
+                                p.qty * kurs_nok
+                            })
+                            .unwrap_or(0.0);
+                        let andel = (eksisterende + sum) / st.equity * 100.0;
+                        ui.label(format!("{symbol} blir ca. {andel:.0} % av porteføljen din."));
+                        if andel > 25.0 {
+                            ui.label(
+                                RichText::new(
+                                    "⚠ Det er en stor bit av porteføljen — vurder å spre kjøpene.",
+                                )
+                                .color(YELLOW),
+                            );
+                        }
+                    }
+                    if sum > st.cash {
+                        ui.label(
+                            RichText::new(format!(
+                                "⚠ Du har bare {} kr i kontanter — ordren vil trolig bli avvist.",
+                                fmt_thousands(st.cash)
+                            ))
+                            .color(RED),
+                        );
+                    }
+                }
+                Side::Sell => match posisjon {
+                    Some(p) => {
+                        let avg_nok = st
+                            .quotes
+                            .get(&p.symbol)
+                            .map(|q| to_nok(st, &q.currency, p.avg_price))
+                            .unwrap_or(p.avg_price);
+                        let gevinst = (price - avg_nok) * qty;
+                        let pct = if avg_nok > 0.0 { (price / avg_nok - 1.0) * 100.0 } else { 0.0 };
+                        let color = if gevinst >= 0.0 { GREEN } else { RED };
+                        let tekst = if gevinst >= 0.0 {
+                            format!("Du låser inn +{} kr ({pct:+.1} %) i gevinst.", fmt_thousands(gevinst))
+                        } else {
+                            format!("Du tar et tap på {} kr ({pct:+.1} %).", fmt_thousands(gevinst))
+                        };
+                        ui.label(RichText::new(tekst).color(color));
+                        if qty > p.qty {
+                            ui.label(
+                                RichText::new(format!(
+                                    "⚠ Du eier bare {} stk — ordren vil trolig bli avvist.",
+                                    fmt_qty(p.qty)
+                                ))
+                                .color(RED),
+                            );
+                        }
+                    }
+                    None => {
+                        ui.label(
+                            RichText::new(format!("⚠ Du eier ingen {symbol} — ordren vil trolig bli avvist."))
+                                .color(RED),
+                        );
+                    }
+                },
+            }
+
+            ui.add_space(4.0);
+            ui.small("Utføres på neste tikk, gjennom risikoreglene. Kursen er ca. 15 min forsinket.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let (tekst, fyll, fg) = match side {
+                    Side::Buy => ("✅ Bekreft kjøp", GREEN, Color32::BLACK),
+                    Side::Sell => ("✅ Bekreft salg", RED, Color32::WHITE),
+                };
+                if ui
+                    .add(egui::Button::new(RichText::new(tekst).color(fg).strong()).fill(fyll))
+                    .clicked()
+                {
+                    send = true;
+                }
+                if ui.button("Avbryt").clicked() {
+                    close = true;
+                }
+            });
+        });
+
+        if send {
+            st.manual_orders.push_back((symbol.clone(), side, qty));
+            let verb = if side == Side::Buy { "KJØP" } else { "SELG" };
+            st.log(format!("Manuell {verb} {symbol} x{} lagt i kø.", fmt_qty(qty)));
+            st.toast(format!("{verb} {symbol} sendt — utføres på neste tikk."));
+            close = true;
+        }
+        if close {
+            self.pending_order = None;
+        }
     }
 
     fn bottom_panel(&self, ctx: &egui::Context, st: &UiState) {
@@ -990,8 +1291,12 @@ impl App {
                     ui.selectable_value(&mut self.range, ChartRange::Month, "1 mnd");
                     ui.selectable_value(&mut self.range, ChartRange::Week, "1 uke");
                     ui.separator();
-                    ui.selectable_value(&mut self.style, ChartStyle::Candles, "🕯 Candles");
-                    ui.selectable_value(&mut self.style, ChartStyle::Line, "📈 Linje");
+                    ui.toggle_value(&mut self.simple_chart, "✨ Enkel")
+                        .on_hover_text("Skjul faglinjene — vis bare kursen, grønn når den har steget i perioden, rød når den har falt.");
+                    if !self.simple_chart {
+                        ui.selectable_value(&mut self.style, ChartStyle::Candles, "🕯 Candles");
+                        ui.selectable_value(&mut self.style, ChartStyle::Line, "📈 Linje");
+                    }
                 });
             });
 
@@ -1017,9 +1322,47 @@ impl App {
                 None => (Vec::new(), Vec::new(), Vec::new()),
             };
 
-            // Kursgraf med strategiens SMA-linjer — krysningene er kjøps-/salgspunktene.
+            // Retningen i perioden bestemmer fargen: grønn opp, rød ned —
+            // da ser hvem som helst utviklingen uten å lese tall.
+            let start_price = price_pts.first().map(|p| p[1]);
+            let trend_color = match (price_pts.first(), price_pts.last()) {
+                (Some(a), Some(b)) if b[1] >= a[1] => GREEN,
+                (Some(_), Some(_)) => RED,
+                _ => GREEN,
+            };
+
+            // Posisjonen i denne aksjen (om noen) — gir kjøpskurs- og
+            // sikkerhetsnett-linjene i grafen.
+            let posisjon = st.positions.iter().find(|p| p.symbol == symbol).cloned();
+            let (stop_pct, profit_pct) =
+                (self.settings.risk.stop_loss_pct, self.settings.risk.take_profit_pct);
+
+            // Kjøps- og salgsmerker: hvor det faktisk ble handlet.
+            let (buy_marks, sell_marks): (Vec<[f64; 2]>, Vec<[f64; 2]>) = {
+                let mut buys = Vec::new();
+                let mut sells = Vec::new();
+                for (sym, ts, is_buy, price) in self.chart_fills(st) {
+                    if sym == &symbol && cutoff.is_none_or(|c| *ts >= c) {
+                        if *is_buy {
+                            buys.push([*ts, *price]);
+                        } else {
+                            sells.push([*ts, *price]);
+                        }
+                    }
+                }
+                (buys, sells)
+            };
+
+            let valuta = st
+                .quotes
+                .get(&symbol)
+                .map(|q| if q.currency.is_empty() { "kr".to_string() } else { q.currency.clone() })
+                .unwrap_or_else(|| "kr".to_string());
+
             let equity_h = 130.0;
             let chart_h = (ui.available_height() - equity_h - 60.0).max(220.0);
+            let simple = self.simple_chart;
+            let price_pts_for_plot = price_pts.clone();
             Plot::new("kursgraf")
                 .height(chart_h)
                 .legend(Legend::default())
@@ -1028,24 +1371,25 @@ impl App {
                         .map(|dt| dt.format("%d.%m").to_string())
                         .unwrap_or_default()
                 })
-                .label_formatter(|name, value| {
+                .label_formatter(move |name, value| {
                     let when = chrono::DateTime::from_timestamp(value.x as i64, 0)
-                        .map(|dt| dt.format("%d.%m.%Y %H:%M").to_string())
+                        .map(|dt| dt.format("%d.%m.%Y").to_string())
                         .unwrap_or_default();
                     if name.is_empty() {
-                        format!("{when}\n{:.2}", value.y)
+                        format!("{when}\n{:.2} {valuta}", value.y)
                     } else {
-                        format!("{name}\n{when}\n{:.2}", value.y)
+                        format!("{name}\n{when}\n{:.2} {valuta}", value.y)
                     }
                 })
                 .show(ui, |plot_ui| {
-                    match self.style {
+                    let line_style = if simple { ChartStyle::Line } else { self.style };
+                    match line_style {
                         ChartStyle::Line => {
-                            let min_y = price_pts.iter().map(|p| p[1]).fold(f64::MAX, f64::min);
+                            let min_y = price_pts_for_plot.iter().map(|p| p[1]).fold(f64::MAX, f64::min);
                             plot_ui.line(
-                                Line::new(PlotPoints::from(price_pts))
-                                    .color(GREEN)
-                                    .width(2.0)
+                                Line::new(PlotPoints::from(price_pts_for_plot))
+                                    .color(trend_color)
+                                    .width(2.2)
                                     .fill(min_y as f32)
                                     .name("Kurs"),
                             );
@@ -1078,20 +1422,101 @@ impl App {
                             plot_ui.box_plot(BoxPlot::new(elems).name("Dagsstolper"));
                         }
                     }
-                    plot_ui.line(
-                        Line::new(PlotPoints::from(fast_pts))
-                            .color(YELLOW)
-                            .width(1.2)
-                            .name(format!("SMA {fast_n} (rask)")),
-                    );
-                    plot_ui.line(
-                        Line::new(PlotPoints::from(slow_pts))
-                            .color(BLUE)
-                            .width(1.2)
-                            .name(format!("SMA {slow_n} (treg)")),
-                    );
+                    if !simple {
+                        plot_ui.line(
+                            Line::new(PlotPoints::from(fast_pts.clone()))
+                                .color(YELLOW)
+                                .width(1.2)
+                                .name(format!("SMA {fast_n} (rask)")),
+                        );
+                        plot_ui.line(
+                            Line::new(PlotPoints::from(slow_pts.clone()))
+                                .color(BLUE)
+                                .width(1.2)
+                                .name(format!("SMA {slow_n} (treg)")),
+                        );
+                    }
+
+                    // Der perioden startet — alt over er pluss, alt under er minus.
+                    if let Some(start) = start_price {
+                        plot_ui.hline(
+                            HLine::new(start)
+                                .color(GRAY)
+                                .width(1.0)
+                                .style(LineStyle::dashed_loose())
+                                .name("Periodestart"),
+                        );
+                    }
+
+                    // Eier du aksjen, tegnes kjøpskursen og sikkerhetsnettene inn.
+                    if let Some(p) = &posisjon {
+                        plot_ui.hline(
+                            HLine::new(p.avg_price)
+                                .color(BLUE)
+                                .width(1.4)
+                                .style(LineStyle::dashed_dense())
+                                .name(format!("Din kjøpskurs {:.2}", p.avg_price)),
+                        );
+                        if stop_pct > 0.0 {
+                            let nivaa = p.avg_price * (1.0 - stop_pct / 100.0);
+                            plot_ui.hline(
+                                HLine::new(nivaa)
+                                    .color(RED)
+                                    .width(1.0)
+                                    .style(LineStyle::dashed_loose())
+                                    .name(format!("Stop-loss {nivaa:.2} (−{stop_pct:.0} %)")),
+                            );
+                        }
+                        if profit_pct > 0.0 {
+                            let nivaa = p.avg_price * (1.0 + profit_pct / 100.0);
+                            plot_ui.hline(
+                                HLine::new(nivaa)
+                                    .color(GREEN)
+                                    .width(1.0)
+                                    .style(LineStyle::dashed_loose())
+                                    .name(format!("Gevinstsikring {nivaa:.2} (+{profit_pct:.0} %)")),
+                            );
+                        }
+                    }
+
+                    // ▲ = kjøpt her, ▼ = solgt her.
+                    if !buy_marks.is_empty() {
+                        plot_ui.points(
+                            Points::new(PlotPoints::from(buy_marks))
+                                .shape(MarkerShape::Up)
+                                .radius(6.0)
+                                .color(GREEN)
+                                .name("Kjøpt her ▲"),
+                        );
+                    }
+                    if !sell_marks.is_empty() {
+                        plot_ui.points(
+                            Points::new(PlotPoints::from(sell_marks))
+                                .shape(MarkerShape::Down)
+                                .radius(6.0)
+                                .color(RED)
+                                .name("Solgt her ▼"),
+                        );
+                    }
                 });
-            ui.small("Strategien sma_cross kjøper når gul (rask) krysser over blå (treg), og selger ved kryss under. Zoom med musehjulet.");
+            if !self.simple_chart {
+                ui.small("Strategien sma_cross kjøper når gul (rask) krysser over blå (treg), og selger ved kryss under. Zoom med musehjulet.")
+                    .on_hover_text("SMA = gjennomsnittskursen siste N dager. Når det korte snittet krysser det lange, har retningen ofte snudd.");
+            }
+
+            // «Hva ser jeg?» — grafen forklart i klartekst.
+            let forklaring = chart_explainer(&symbol, st, &price_pts, self.range, fast_pts.last().zip(slow_pts.last()).map(|(f, s)| f[1] >= s[1]), posisjon.as_ref());
+            egui::Frame::none()
+                .fill(BG_CARD)
+                .stroke(egui::Stroke::new(1.0, BORDER))
+                .rounding(egui::Rounding::same(8.0))
+                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("💡 Hva ser jeg?").strong().color(GRAY));
+                        ui.label(forklaring);
+                    });
+                });
 
             ui.add_space(6.0);
             ui.label(RichText::new("Egenkapital denne økten").strong().color(GRAY));
@@ -1960,6 +2385,18 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
          Bytt strategi i Strategi-panelet, overstyr per aksje, og test alltid med 🧪 Backtest eller ⚖ Sammenlign først.",
     ),
     (
+        "⚡ Kjøp og salg",
+        "Enklest mulig: velg en aksje, skriv hvor mange KRONER du vil handle for (eller bruk \
+         hurtigknappene 1 000/5 000/10 000/Maks), og trykk KJØP eller SELG. Appen regner ut antallet \
+         og viser en oppsummering i klartekst — hva det koster, hva du har igjen etterpå, og hvor \
+         stor bit av porteføljen aksjen blir — før noe som helst sendes. På hver posisjon finnes også \
+         «Selg alt» og «½», med gevinsten du låser inn vist før du bekrefter.\n\
+         I grafen: grønn linje = steget i perioden, rød = falt. ▲/▼ viser hvor det ble kjøpt og \
+         solgt, blå stiplet linje er din kjøpskurs, og de røde/grønne stiplede linjene er stop-loss og \
+         gevinstsikring. «Hva ser jeg?»-boksen under grafen forklarer alt i vanlige ord — og \
+         ✨ Enkel-knappen skjuler faglinjene helt.",
+    ),
+    (
         "🛡️ Sikkerhetsnettene",
         "Stop-loss: selger automatisk hvis en posisjon faller X % under kjøpskursen.\n\
          Take-profit: sikrer gevinst ved +X %.\n\
@@ -2074,6 +2511,71 @@ fn run_backtest(
 
 /// Rullerende gjennomsnitt over (tid, kurs)-serien — samme beregning som
 /// strategien bruker, så grafen viser nøyaktig det strategien ser.
+/// Grafen oppsummert i klartekst for folk som ikke leser candlesticks:
+/// retning i valgt periode, trend, RSI på folkemunne og din egen posisjon.
+fn chart_explainer(
+    symbol: &str,
+    st: &UiState,
+    price_pts: &[[f64; 2]],
+    range: ChartRange,
+    trend_up: Option<bool>,
+    posisjon: Option<&crate::types::Position>,
+) -> String {
+    let periode = match range {
+        ChartRange::Week => "den siste uken",
+        ChartRange::Month => "den siste måneden",
+        ChartRange::ThreeMonths => "de siste 3 månedene",
+        ChartRange::Year => "det siste året",
+        ChartRange::All => "hele perioden",
+    };
+    let mut deler: Vec<String> = Vec::new();
+
+    if let (Some(a), Some(b)) = (price_pts.first(), price_pts.last()) {
+        if a[1] > 0.0 {
+            let pct = (b[1] / a[1] - 1.0) * 100.0;
+            if pct >= 0.0 {
+                deler.push(format!("📈 {symbol} har steget {pct:.1} % {periode}."));
+            } else {
+                deler.push(format!("📉 {symbol} har falt {:.1} % {periode}.", -pct));
+            }
+        }
+    }
+
+    match trend_up {
+        Some(true) => deler.push("Trenden peker opp — snittkursen de siste dagene ligger over det lengre snittet.".into()),
+        Some(false) => deler.push("Trenden peker ned — snittkursen de siste dagene ligger under det lengre snittet.".into()),
+        None => {}
+    }
+
+    if let Some(h) = st.history.get(symbol) {
+        let closes: Vec<f64> = h.iter().map(|&(_, p)| p).collect();
+        if let Some(v) = crate::market::rsi(&closes, 14) {
+            if v <= 30.0 {
+                deler.push(format!("RSI på {v:.0} betyr at aksjen kan være billig akkurat nå (oversolgt)."));
+            } else if v >= 70.0 {
+                deler.push(format!("RSI på {v:.0} betyr at aksjen kan være dyr akkurat nå (overkjøpt)."));
+            } else {
+                deler.push(format!("RSI på {v:.0} er normalt — verken billig eller dyr."));
+            }
+        }
+    }
+
+    match posisjon {
+        Some(p) if p.avg_price > 0.0 => {
+            let pct = (p.last / p.avg_price - 1.0) * 100.0;
+            let retning = if pct >= 0.0 { "pluss" } else { "minus" };
+            deler.push(format!(
+                "Du eier {} stk kjøpt til snitt {:.2} (blå stiplet linje) — du ligger {pct:+.1} % i {retning}.",
+                fmt_qty(p.qty),
+                p.avg_price
+            ));
+        }
+        _ => deler.push(format!("Du eier ingen {symbol} akkurat nå.")),
+    }
+
+    deler.join(" ")
+}
+
 fn sma_series(history: &VecDeque<(f64, f64)>, window: usize) -> Vec<[f64; 2]> {
     if window == 0 || history.len() < window {
         return Vec::new();
@@ -2087,6 +2589,39 @@ fn sma_series(history: &VecDeque<(f64, f64)>, window: usize) -> Vec<[f64; 2]> {
         out.push([vals[i].0, sum / window as f64]);
     }
     out
+}
+
+/// Omregn en verdi i instrumentets valuta til kontovaluta (kroner).
+fn to_nok(st: &UiState, currency: &str, value: f64) -> f64 {
+    if currency.is_empty() {
+        return value;
+    }
+    match st.fx_rates.get(currency) {
+        Some(rate) => value * rate,
+        None => value, // samme valuta som kontoen, eller kurs ikke hentet ennå
+    }
+}
+
+/// Hvor mange aksjer får du for beløpet? Hele aksjer for aksjer,
+/// brøkdeler for krypto.
+fn kjopbart_antall(symbol: &str, belop_kr: f64, price_nok: f64) -> f64 {
+    if price_nok <= 0.0 {
+        return 0.0;
+    }
+    if crate::types::is_crypto(symbol) {
+        belop_kr / price_nok
+    } else {
+        (belop_kr / price_nok).floor()
+    }
+}
+
+/// Antall med brøkdeler bare når det trengs (krypto).
+fn fmt_qty(qty: f64) -> String {
+    if (qty - qty.round()).abs() < 1e-9 {
+        format!("{qty:.0}")
+    } else {
+        format!("{qty:.6}").trim_end_matches('0').trim_end_matches('.').to_string()
+    }
 }
 
 fn badge(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32) {
@@ -2128,5 +2663,30 @@ fn fmt_thousands(v: f64) -> String {
         format!("-{out}")
     } else {
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fmt_qty, kjopbart_antall};
+
+    #[test]
+    fn kronebelop_gir_hele_aksjer() {
+        // 5 000 kr / 352 kr = 14,2 → 14 hele aksjer.
+        assert_eq!(kjopbart_antall("EQNR.OL", 5_000.0, 352.0), 14.0);
+        // For lite til én aksje.
+        assert_eq!(kjopbart_antall("EQNR.OL", 100.0, 352.0), 0.0);
+        // Krypto handles i brøkdeler.
+        let btc = kjopbart_antall("BTC-USD", 5_000.0, 700_000.0);
+        assert!((btc - 5_000.0 / 700_000.0).abs() < 1e-12);
+        // Ugyldig kurs skal aldri gi antall.
+        assert_eq!(kjopbart_antall("EQNR.OL", 5_000.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn antall_formateres_uten_unodige_desimaler() {
+        assert_eq!(fmt_qty(14.0), "14");
+        assert_eq!(fmt_qty(0.5), "0.5");
+        assert_eq!(fmt_qty(0.007143), "0.007143");
     }
 }

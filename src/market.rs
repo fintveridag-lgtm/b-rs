@@ -92,7 +92,7 @@ fn sma(closes: &[f64], n: usize) -> Option<f64> {
     Some(closes[closes.len() - n..].iter().sum::<f64>() / n as f64)
 }
 
-fn rsi(closes: &[f64], period: usize) -> Option<f64> {
+pub(crate) fn rsi(closes: &[f64], period: usize) -> Option<f64> {
     if closes.len() < period + 1 {
         return None;
     }
