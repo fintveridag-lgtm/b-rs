@@ -1,6 +1,6 @@
 use crate::pnl::Fill;
-use crate::state::{Alarm, TxRow};
-use crate::types::{Order, Position};
+use crate::state::{Alarm, LimitOrder, SavingsPlan, TxRow};
+use crate::types::{Order, Position, Side};
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::sync::Mutex;
@@ -48,6 +48,23 @@ impl Store {
             CREATE TABLE IF NOT EXISTS symbol_strategy (
                 symbol TEXT PRIMARY KEY,
                 strategy TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS limit_orders (
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                qty REAL NOT NULL,
+                amount_kr REAL NOT NULL,
+                level REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS savings_plans (
+                symbol TEXT NOT NULL,
+                amount_kr REAL NOT NULL,
+                day INTEGER NOT NULL,
+                last_run TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );",
         )?;
         Ok(Self { conn: Mutex::new(conn) })
@@ -156,6 +173,93 @@ impl Store {
             .filter_map(|r| r.ok())
             .collect();
         Ok(alarms)
+    }
+
+    /// Lagre alle ventende limit-ordrer (erstatter det som ligger der).
+    pub fn save_limit_orders(&self, orders: &[LimitOrder]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM limit_orders", [])?;
+        for o in orders {
+            tx.execute(
+                "INSERT INTO limit_orders (symbol, side, qty, amount_kr, level)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![o.symbol, o.side.to_string(), o.qty, o.amount_kr, o.level],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn load_limit_orders(&self) -> Result<Vec<LimitOrder>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT symbol, side, qty, amount_kr, level FROM limit_orders")?;
+        let orders = stmt
+            .query_map([], |r| {
+                let side: String = r.get(1)?;
+                Ok(LimitOrder {
+                    symbol: r.get(0)?,
+                    side: if side == "KJØP" { Side::Buy } else { Side::Sell },
+                    qty: r.get(2)?,
+                    amount_kr: r.get(3)?,
+                    level: r.get(4)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(orders)
+    }
+
+    /// Lagre alle spareavtaler (erstatter det som ligger der).
+    pub fn save_savings_plans(&self, plans: &[SavingsPlan]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM savings_plans", [])?;
+        for p in plans {
+            tx.execute(
+                "INSERT INTO savings_plans (symbol, amount_kr, day, last_run)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![p.symbol, p.amount_kr, p.day, p.last_run],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn load_savings_plans(&self) -> Result<Vec<SavingsPlan>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT symbol, amount_kr, day, last_run FROM savings_plans")?;
+        let plans = stmt
+            .query_map([], |r| {
+                Ok(SavingsPlan {
+                    symbol: r.get(0)?,
+                    amount_kr: r.get(1)?,
+                    day: r.get(2)?,
+                    last_run: r.get(3)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(plans)
+    }
+
+    /// Små nøkkel/verdi-fakta som må overleve omstart (ukesrapport-status o.l.).
+    pub fn meta_get(&self, key: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
     }
 
     /// Lagre strategi-per-aksje-valgene (erstatter det som ligger der).
@@ -296,5 +400,51 @@ mod tests {
         let (cash, loaded) = store.load_paper_state().unwrap().unwrap();
         assert_eq!(cash, 100_000.0);
         assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn limit_orders_roundtrip() {
+        let store = Store::open(":memory:").unwrap();
+        assert!(store.load_limit_orders().unwrap().is_empty());
+        let orders = vec![
+            LimitOrder { symbol: "EQNR.OL".into(), side: Side::Buy, qty: 0.0, amount_kr: 5_000.0, level: 340.0 },
+            LimitOrder { symbol: "MOWI.OL".into(), side: Side::Sell, qty: 25.0, amount_kr: 0.0, level: 210.0 },
+        ];
+        store.save_limit_orders(&orders).unwrap();
+        let loaded = store.load_limit_orders().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].symbol, "EQNR.OL");
+        assert!(matches!(loaded[0].side, Side::Buy));
+        assert_eq!(loaded[0].amount_kr, 5_000.0);
+        assert!(matches!(loaded[1].side, Side::Sell));
+        assert_eq!(loaded[1].qty, 25.0);
+    }
+
+    #[test]
+    fn savings_plans_roundtrip() {
+        let store = Store::open(":memory:").unwrap();
+        assert!(store.load_savings_plans().unwrap().is_empty());
+        let plans = vec![SavingsPlan {
+            symbol: "EQNR.OL".into(),
+            amount_kr: 2_000.0,
+            day: 5,
+            last_run: "2026-06".into(),
+        }];
+        store.save_savings_plans(&plans).unwrap();
+        let loaded = store.load_savings_plans().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].day, 5);
+        assert_eq!(loaded[0].last_run, "2026-06");
+    }
+
+    #[test]
+    fn meta_roundtrip() {
+        let store = Store::open(":memory:").unwrap();
+        assert!(store.meta_get("finnes_ikke").is_none());
+        store.meta_set("last_weekly_report", "2026-W28").unwrap();
+        assert_eq!(store.meta_get("last_weekly_report").as_deref(), Some("2026-W28"));
+        // Overskriving.
+        store.meta_set("last_weekly_report", "2026-W29").unwrap();
+        assert_eq!(store.meta_get("last_weekly_report").as_deref(), Some("2026-W29"));
     }
 }

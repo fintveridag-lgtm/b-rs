@@ -97,6 +97,49 @@ pub struct UiState {
     pub morgan_report: Option<String>,
     pub morgan_error: Option<String>,
     pub morgan_pending: bool,
+    /// Ventende limit-ordrer: handles automatisk når nivået brytes.
+    pub limit_orders: Vec<LimitOrder>,
+    /// Spareavtaler: fast kjøp i kroner på fast dag i måneden.
+    pub savings_plans: Vec<SavingsPlan>,
+    /// Nyheter for valgt symbol: (symbolet de gjelder, sakene, ventestatus).
+    pub news_symbol: String,
+    pub news: Vec<NewsItem>,
+    pub news_pending: bool,
+}
+
+/// En ventende limit-ordre. KJØP utløses når kursen faller til eller under
+/// nivået, SELG når den stiger til eller over. Nivået er i instrumentets
+/// valuta (samme tall som i grafen); beløpet i kroner.
+#[derive(Debug, Clone)]
+pub struct LimitOrder {
+    pub symbol: String,
+    pub side: Side,
+    /// Antall — 0 hvis ordren er beløpsbasert.
+    pub qty: f64,
+    /// Beløp i kroner — 0 hvis ordren er antallsbasert.
+    pub amount_kr: f64,
+    pub level: f64,
+}
+
+/// En spareavtale: kjøp for et fast kronebeløp på en fast dag hver måned.
+#[derive(Debug, Clone)]
+pub struct SavingsPlan {
+    pub symbol: String,
+    pub amount_kr: f64,
+    /// Dag i måneden (1–28).
+    pub day: u32,
+    /// Måneden den sist ble utført, "2026-07" — tom hvis aldri.
+    pub last_run: String,
+}
+
+/// Én nyhetssak fra Yahoo Finance.
+#[derive(Debug, Clone)]
+pub struct NewsItem {
+    pub title: String,
+    pub publisher: String,
+    pub url: String,
+    /// Publisert (unixtid).
+    pub ts: i64,
 }
 
 /// Brukerdefinert kursalarm — varsler mobil/logg når nivået brytes.
@@ -165,6 +208,11 @@ impl UiState {
             morgan_report: None,
             morgan_error: None,
             morgan_pending: false,
+            limit_orders: Vec::new(),
+            savings_plans: Vec::new(),
+            news_symbol: String::new(),
+            news: Vec::new(),
+            news_pending: false,
         }
     }
 

@@ -100,6 +100,28 @@ impl Yahoo {
         Ok(out)
     }
 
+    /// Siste nyhetssaker for et symbol fra Yahoo Finance, nyest først.
+    pub async fn news(&self, symbol: &str) -> Result<Vec<crate::state::NewsItem>> {
+        let url = reqwest::Url::parse_with_params(
+            "https://query1.finance.yahoo.com/v1/finance/search",
+            &[("q", symbol), ("quotesCount", "0"), ("newsCount", "8")],
+        )?;
+        let v = self.get_json(url.as_str()).await?;
+        let mut out = Vec::new();
+        for n in v.get("news").and_then(Value::as_array).cloned().unwrap_or_default() {
+            let Some(title) = n.get("title").and_then(Value::as_str) else { continue };
+            let Some(link) = n.get("link").and_then(Value::as_str) else { continue };
+            out.push(crate::state::NewsItem {
+                title: title.to_string(),
+                publisher: n.get("publisher").and_then(Value::as_str).unwrap_or("").to_string(),
+                url: link.to_string(),
+                ts: n.get("providerPublishTime").and_then(Value::as_i64).unwrap_or(0),
+            });
+        }
+        out.sort_by_key(|n| -n.ts);
+        Ok(out)
+    }
+
     /// Alt markedsskjermene trenger i ett kall: siste kurs, dagsvolum og
     /// tre måneder daglig historikk.
     pub async fn snapshot(&self, symbol: &str) -> Result<Snapshot> {

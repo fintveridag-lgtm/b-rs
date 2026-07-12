@@ -150,6 +150,9 @@ pub fn run(deps: GuiDeps) -> Result<()> {
         order_filter: OrderFilter::Alle,
         alarm_level: 0.0,
         alarm_above: false,
+        limit_level: 0.0,
+        savings_amount: 2_000.0,
+        savings_day: 1,
         realized_cache: (usize::MAX, Vec::new()),
         morgan_profile: String::from(
             "Risikotoleranse: moderat\n\
@@ -284,6 +287,11 @@ struct App {
     order_filter: OrderFilter,
     alarm_level: f64,
     alarm_above: bool,
+    /// Nivåfeltet for nye limit-ordrer (0 = fylles med dagens kurs).
+    limit_level: f64,
+    /// Skjema for ny spareavtale: beløp og dag i måneden.
+    savings_amount: f64,
+    savings_day: u32,
     /// (antall transaksjoner da cachen ble bygget, realiserte handler).
     realized_cache: (usize, Vec<RealizedTrade>),
     /// Investeringsprofilen brukeren sender til Morgan.
@@ -422,7 +430,7 @@ impl eframe::App for App {
             View::Handel => {
                 self.left_panel(ctx, &mut st);
                 self.bottom_panel(ctx, &st);
-                self.chart_panel(ctx, &st);
+                self.chart_panel(ctx, &mut st);
             }
             View::Portefolje => self.portfolio_view(ctx, &st),
             View::Ordrer => self.orders_view(ctx, &st),
@@ -935,6 +943,180 @@ impl App {
                     ui.small("Velg et symbol i watchlisten først.");
                 }
 
+                // Limit-ordrer: handle automatisk når kursen når et nivå.
+                ui.add_space(10.0);
+                ui.separator();
+                section_heading(ui, "💤 Ventende ordrer");
+                ui.small("Handler automatisk når kursen når nivået ditt — også når du ikke ser på.");
+                if let Some(sel) = self.selected.clone() {
+                    let current = st.quotes.get(&sel).map(|q| q.last).unwrap_or(0.0);
+                    if self.limit_level <= 0.0 && current > 0.0 {
+                        self.limit_level = (current * 100.0).round() / 100.0;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&sel).strong());
+                        ui.label("nivå:");
+                        ui.add(
+                            egui::DragValue::new(&mut self.limit_level)
+                                .range(0.0..=100_000_000.0)
+                                .speed(0.5)
+                                .max_decimals(2),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        let (qty, amount) = if self.trade_use_kr {
+                            (0.0, self.trade_amount_kr)
+                        } else {
+                            (self.trade_qty, 0.0)
+                        };
+                        let hva = if self.trade_use_kr {
+                            format!("for {} kr", fmt_thousands(self.trade_amount_kr))
+                        } else {
+                            format!("{:.0} stk", self.trade_qty)
+                        };
+                        if ui
+                            .button(RichText::new("KJØP hvis ≤ nivå").color(GREEN))
+                            .on_hover_text(format!("Kjøp {hva} hvis kursen faller til {:.2} eller lavere", self.limit_level))
+                            .clicked()
+                            && self.limit_level > 0.0
+                        {
+                            st.limit_orders.push(crate::state::LimitOrder {
+                                symbol: sel.clone(),
+                                side: Side::Buy,
+                                qty,
+                                amount_kr: amount,
+                                level: self.limit_level,
+                            });
+                            let _ = self.store.save_limit_orders(&st.limit_orders);
+                            st.log(format!("💤 Limit-ordre: KJØP {sel} {hva} hvis kurs ≤ {:.2}.", self.limit_level));
+                        }
+                        if ui
+                            .button(RichText::new("SELG hvis ≥ nivå").color(RED))
+                            .on_hover_text(format!("Selg {hva} hvis kursen stiger til {:.2} eller høyere", self.limit_level))
+                            .clicked()
+                            && self.limit_level > 0.0
+                        {
+                            st.limit_orders.push(crate::state::LimitOrder {
+                                symbol: sel.clone(),
+                                side: Side::Sell,
+                                qty,
+                                amount_kr: amount,
+                                level: self.limit_level,
+                            });
+                            let _ = self.store.save_limit_orders(&st.limit_orders);
+                            st.log(format!("💤 Limit-ordre: SELG {sel} {hva} hvis kurs ≥ {:.2}.", self.limit_level));
+                        }
+                    });
+                }
+                let mut delete_limit: Option<usize> = None;
+                for (i, lo) in st.limit_orders.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("🗑").clicked() {
+                            delete_limit = Some(i);
+                        }
+                        let hva = if lo.amount_kr > 0.0 {
+                            format!("for {} kr", fmt_thousands(lo.amount_kr))
+                        } else {
+                            format!("{} stk", fmt_qty(lo.qty))
+                        };
+                        let (retning, farge) = match lo.side {
+                            Side::Buy => ("≤", GREEN),
+                            Side::Sell => ("≥", RED),
+                        };
+                        ui.label(
+                            RichText::new(format!(
+                                "{} {} {hva} når kurs {retning} {:.2}",
+                                lo.side, lo.symbol, lo.level
+                            ))
+                            .color(farge)
+                            .small(),
+                        );
+                    });
+                }
+                if let Some(i) = delete_limit {
+                    st.limit_orders.remove(i);
+                    let _ = self.store.save_limit_orders(&st.limit_orders);
+                }
+                if st.limit_orders.is_empty() {
+                    ui.small("Ingen ventende ordrer.");
+                }
+
+                // Spareavtaler: månedlig kjøp for fast beløp.
+                ui.add_space(10.0);
+                ui.separator();
+                section_heading(ui, "📅 Spareavtale");
+                ui.small("Kjøper automatisk for et fast beløp samme dag hver måned.");
+                if let Some(sel) = self.selected.clone() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&sel).strong());
+                        ui.add(
+                            egui::DragValue::new(&mut self.savings_amount)
+                                .range(100.0..=10_000_000.0)
+                                .speed(100)
+                                .max_decimals(0)
+                                .suffix(" kr"),
+                        );
+                        ui.label("dag");
+                        ui.add(
+                            egui::DragValue::new(&mut self.savings_day)
+                                .range(1..=28)
+                                .speed(1),
+                        );
+                        if ui.button("Legg til").clicked() && self.savings_amount > 0.0 {
+                            // Er dagen alt passert denne måneden, starter
+                            // avtalen neste måned — ingen overraskelseskjøp nå.
+                            let now = chrono::Local::now();
+                            let last_run = if chrono::Datelike::day(&now) >= self.savings_day {
+                                now.format("%Y-%m").to_string()
+                            } else {
+                                String::new()
+                            };
+                            st.savings_plans.push(crate::state::SavingsPlan {
+                                symbol: sel.clone(),
+                                amount_kr: self.savings_amount,
+                                day: self.savings_day,
+                                last_run,
+                            });
+                            let _ = self.store.save_savings_plans(&st.savings_plans);
+                            st.log(format!(
+                                "📅 Spareavtale: {} kr i {sel} den {}. hver måned.",
+                                fmt_thousands(self.savings_amount),
+                                self.savings_day
+                            ));
+                        }
+                    });
+                }
+                let mut delete_plan: Option<usize> = None;
+                for (i, p) in st.savings_plans.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("🗑").clicked() {
+                            delete_plan = Some(i);
+                        }
+                        let sist = if p.last_run.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" (sist: {})", p.last_run)
+                        };
+                        ui.label(
+                            RichText::new(format!(
+                                "{} kr i {} den {}. hver mnd{sist}",
+                                fmt_thousands(p.amount_kr),
+                                p.symbol,
+                                p.day
+                            ))
+                            .color(BLUE)
+                            .small(),
+                        );
+                    });
+                }
+                if let Some(i) = delete_plan {
+                    st.savings_plans.remove(i);
+                    let _ = self.store.save_savings_plans(&st.savings_plans);
+                }
+                if st.savings_plans.is_empty() {
+                    ui.small("Ingen spareavtaler — jevn månedlig sparing slår som regel timing.");
+                }
+
                 // Kursalarmer
                 ui.add_space(10.0);
                 ui.separator();
@@ -1267,7 +1449,46 @@ impl App {
             });
     }
 
-    fn chart_panel(&mut self, ctx: &egui::Context, st: &UiState) {
+    /// Send Morgan på dypdykk i én bestemt aksje (rapporten vises i 🧠-fanen).
+    fn ask_morgan_about(&self, symbol: &str, st: &mut UiState) {
+        match std::env::var("ANTHROPIC_API_KEY") {
+            Err(_) => {
+                st.morgan_error = Some(
+                    "Mangler API-nøkkel. Opprett en på console.anthropic.com og sett \
+                     miljøvariabelen ANTHROPIC_API_KEY før du starter appen \
+                     (Windows: setx ANTHROPIC_API_KEY \"sk-ant-…\", start appen på nytt)."
+                        .into(),
+                );
+            }
+            Ok(key) => {
+                st.morgan_pending = true;
+                st.morgan_error = None;
+                st.log(format!("🧠 Morgan dykker ned i {symbol} …"));
+                let ctx_json = crate::morgan::symbol_context(st, symbol);
+                let state = self.state.clone();
+                let symbol = symbol.to_string();
+                self.rt.spawn(async move {
+                    let result = crate::morgan::analyze_symbol(&key, &symbol, &ctx_json).await;
+                    let mut st = state.lock().unwrap();
+                    st.morgan_pending = false;
+                    match result {
+                        Ok(report) => {
+                            st.morgan_report = Some(report);
+                            st.toast(format!("🧠 Morgan er ferdig med {symbol}."));
+                            st.log("🧠 Morgan leverte dypdykket.");
+                        }
+                        Err(e) => {
+                            let msg = format!("{e:#}");
+                            st.log(format!("🧠 Morgan feilet: {msg}"));
+                            st.morgan_error = Some(msg);
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    fn chart_panel(&mut self, ctx: &egui::Context, st: &mut UiState) {
         egui::CentralPanel::default().show(ctx, |ui| {
             let Some(symbol) = self.selected.clone() else {
                 ui.centered_and_justified(|ui| {
@@ -1283,6 +1504,14 @@ impl App {
                     let pct = q.change_pct();
                     let color = if pct >= 0.0 { GREEN } else { RED };
                     ui.label(RichText::new(format!("{:.2}  ({pct:+.2} %)", q.last)).color(color).strong().size(18.0));
+                }
+                if ui
+                    .add_enabled(!st.morgan_pending, egui::Button::new("🧠 Spør Morgan"))
+                    .on_hover_text("Dypdykk i denne aksjen fra AI-analysesjefen (krever ANTHROPIC_API_KEY)")
+                    .clicked()
+                {
+                    self.ask_morgan_about(&symbol, st);
+                    self.view = View::Morgan;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.selectable_value(&mut self.range, ChartRange::All, "Alt");
@@ -1360,7 +1589,8 @@ impl App {
                 .unwrap_or_else(|| "kr".to_string());
 
             let equity_h = 130.0;
-            let chart_h = (ui.available_height() - equity_h - 60.0).max(220.0);
+            // Reserver plass til forklaringsboksen og nyhetene under grafen.
+            let chart_h = (ui.available_height() - equity_h - 230.0).max(220.0);
             let simple = self.simple_chart;
             let price_pts_for_plot = price_pts.clone();
             Plot::new("kursgraf")
@@ -1518,6 +1748,47 @@ impl App {
                     });
                 });
 
+            // 📰 Nyheter for valgt symbol — hentes når du bytter aksje.
+            if st.news_symbol != symbol && !st.news_pending {
+                st.news_pending = true;
+                st.news_symbol = symbol.clone();
+                st.news.clear();
+                let market = self.market.clone();
+                let state = self.state.clone();
+                let sym = symbol.clone();
+                self.rt.spawn(async move {
+                    let items = market.news(&sym).await.unwrap_or_default();
+                    let mut st = state.lock().unwrap();
+                    st.news_pending = false;
+                    // Bare hvis brukeren fortsatt ser på samme symbol.
+                    if st.news_symbol == sym {
+                        st.news = items;
+                    }
+                });
+            }
+            egui::CollapsingHeader::new(RichText::new("📰 Nyheter").strong())
+                .default_open(true)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("nyheter").max_height(90.0).show(ui, |ui| {
+                        if st.news_pending {
+                            ui.spinner();
+                        }
+                        for n in &st.news {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.hyperlink_to(RichText::new(&n.title).small(), &n.url);
+                                ui.label(
+                                    RichText::new(format!("— {}{}", n.publisher, fmt_news_age(n.ts)))
+                                        .small()
+                                        .color(GRAY),
+                                );
+                            });
+                        }
+                        if !st.news_pending && st.news.is_empty() {
+                            ui.small("Fant ingen nyheter for dette symbolet.");
+                        }
+                    });
+                });
+
             ui.add_space(6.0);
             ui.label(RichText::new("Egenkapital denne økten").strong().color(GRAY));
             let eq_pts: Vec<[f64; 2]> = st.equity_history.iter().map(|&(t, v)| [t, v]).collect();
@@ -1564,6 +1835,44 @@ impl App {
                 };
                 let total_kr = st.equity - st.start_cash;
                 let total_pct = if st.start_cash > 0.0 { total_kr / st.start_cash * 100.0 } else { 0.0 };
+
+                // Sparemålet: fremdriftslinje mot beløpet og året i konfigen.
+                if self.settings.goal.amount > 0.0 {
+                    use chrono::Datelike;
+                    let goal = self.settings.goal.amount;
+                    let frac = (st.equity / goal).clamp(0.0, 1.0) as f32;
+                    ui.add(
+                        egui::ProgressBar::new(frac)
+                            .fill(GREEN)
+                            .text(
+                                RichText::new(format!(
+                                    "🎯 {} av {} kr ({:.0} %)",
+                                    fmt_thousands(st.equity),
+                                    fmt_thousands(goal),
+                                    frac * 100.0
+                                ))
+                                .color(Color32::WHITE)
+                                .strong(),
+                            ),
+                    );
+                    if st.equity >= goal {
+                        ui.label(RichText::new("Målet er nådd! 🎉").color(GREEN).strong());
+                    } else if self.settings.goal.year > 0 {
+                        let now = chrono::Local::now();
+                        let months = ((self.settings.goal.year - now.year()) * 12
+                            + (12 - now.month() as i32))
+                            .max(1);
+                        let trengs = (goal - st.equity) / months as f64;
+                        ui.small(format!(
+                            "Mål: {} kr innen utgangen av {}. Med jevn sparing trengs ca. {} kr/mnd ({} måneder igjen). Settes i ⚙ Innstillinger.",
+                            fmt_thousands(goal),
+                            self.settings.goal.year,
+                            fmt_thousands(trengs),
+                            months
+                        ));
+                    }
+                    ui.add_space(12.0);
+                }
 
                 // Kontooversikt
                 section_heading(ui, "🏦 Kontoer");
@@ -1941,6 +2250,18 @@ impl App {
                     ui.add(egui::DragValue::new(&mut s.risk.trailing_stop_pct).range(0.0..=90.0).speed(0.5));
                     ui.end_row();
                 });
+
+                ui.add_space(10.0);
+                section_heading(ui, "Sparemål");
+                egui::Grid::new("innst_maal").min_col_width(190.0).show(ui, |ui| {
+                    ui.label("Målbeløp (kr, 0 = av)");
+                    ui.add(egui::DragValue::new(&mut s.goal.amount).range(0.0..=1_000_000_000.0).speed(5000));
+                    ui.end_row();
+                    ui.label("Innen år");
+                    ui.add(egui::DragValue::new(&mut s.goal.year).range(0..=2100));
+                    ui.end_row();
+                });
+                ui.small("Vises som fremdriftslinje øverst i 💼 Portefølje.");
 
                 ui.add_space(10.0);
                 section_heading(ui, "Mobilvarsler");
@@ -2397,6 +2718,22 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
          ✨ Enkel-knappen skjuler faglinjene helt.",
     ),
     (
+        "💤 Automatikk som jobber for deg",
+        "Ventende ordrer (limit): «kjøp for 5 000 kr hvis kursen faller til 340» — appen handler \
+         automatisk når nivået brytes, også når du ikke ser på. KJØP utløses når kursen faller til \
+         eller under nivået, SELG når den stiger til eller over.\n\
+         Spareavtale: kjøp for et fast kronebeløp samme dag hver måned — jevn sparing slår som \
+         regel forsøk på timing. Legges den til etter at dagen er passert, starter den neste måned.\n\
+         Ukesrapport: har du mobilvarsler på, får du hver fredag ettermiddag en oppsummering av uken \
+         — porteføljens utvikling, beste og svakeste aksje.\n\
+         Alt utføres gjennom risikoreglene og stoppes av kill switch. Begge deler overlever omstart.",
+    ),
+    (
+        "🎯 Sparemål",
+        "Sett et målbeløp og årstall i ⚙ Innstillinger → Sparemål, så viser 💼 Portefølje en \
+         fremdriftslinje mot målet og hvor mye du må spare i måneden for å nå det med jevn sparing.",
+    ),
+    (
         "🛡️ Sikkerhetsnettene",
         "Stop-loss: selger automatisk hvis en posisjon faller X % under kjøpskursen.\n\
          Take-profit: sikrer gevinst ved +X %.\n\
@@ -2424,7 +2761,9 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
         "Morgan er en tenkt senior aksjeanalytiker drevet av Claude (Anthropic). Beskriv \
          investeringsprofilen din i 🧠-fanen, så leverer han en komplett screeningrapport: topp 10 \
          aksjer, P/E mot sektoren, omsetningsvekst, gjeldsgrad, utbytte, vollgrav, bull/bear-kursmål, \
-         risiko 1–10, inngangssoner og stop-loss — basert på appens sanntidskurser.\n\
+         risiko 1–10, inngangssoner og stop-loss — basert på appens sanntidskurser. \
+         «🧠 Spør Morgan»-knappen ved grafen gir et raskere dypdykk i én enkelt aksje: for/imot, \
+         nivåer og hva du bør følge med på.\n\
          Krever en API-nøkkel fra console.anthropic.com i miljøvariabelen ANTHROPIC_API_KEY \
          (Windows: setx ANTHROPIC_API_KEY \"sk-ant-…\", start appen på nytt). Hver analyse er ett \
          betalt API-kall (noen kroner). Fundamentaltallene er fra modellens kunnskap — verifiser før handel.",
@@ -2589,6 +2928,19 @@ fn sma_series(history: &VecDeque<(f64, f64)>, window: usize) -> Vec<[f64; 2]> {
         out.push([vals[i].0, sum / window as f64]);
     }
     out
+}
+
+/// «for 2 t siden» / «for 3 d siden» — alder på en nyhetssak.
+fn fmt_news_age(ts: i64) -> String {
+    if ts <= 0 {
+        return String::new();
+    }
+    let secs = (chrono::Utc::now().timestamp() - ts).max(0);
+    match secs {
+        s if s < 3600 => format!(", for {} min siden", s / 60),
+        s if s < 86400 => format!(", for {} t siden", s / 3600),
+        s => format!(", for {} d siden", s / 86400),
+    }
 }
 
 /// Omregn en verdi i instrumentets valuta til kontovaluta (kroner).

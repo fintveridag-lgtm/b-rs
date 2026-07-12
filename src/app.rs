@@ -73,6 +73,15 @@ pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path
         st.transactions = store.recent_orders(500).unwrap_or_default();
         st.alarms = store.load_alarms().unwrap_or_default();
         st.symbol_strategy = store.load_symbol_strategies().unwrap_or_default();
+        st.limit_orders = store.load_limit_orders().unwrap_or_default();
+        st.savings_plans = store.load_savings_plans().unwrap_or_default();
+        let (n_limits, n_plans) = (st.limit_orders.len(), st.savings_plans.len());
+        if n_limits > 0 {
+            st.log(format!("{n_limits} ventende limit-ordrer lastet fra forrige økt."));
+        }
+        if n_plans > 0 {
+            st.log(format!("{n_plans} spareavtaler aktive."));
+        }
         if let Some(msg) = backup_msg {
             st.log(msg);
         }

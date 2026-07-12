@@ -100,8 +100,81 @@ pub fn market_context(st: &UiState) -> String {
     .to_string()
 }
 
-/// Kjør analysen: ett kall til Anthropic Messages API (Claude Opus 4.8).
+/// Systemprompt for dypdykk i ÉN aksje — mindre og raskere enn full screening.
+const SYMBOL_PROMPT: &str = r#"Du er «Morgan», en tenkt senior aksjeanalytiker med 20 års erfaring, innebygd analysesjef i brukerens private handelsapp (b-rs). Brukeren ber om et dypdykk i ÉN bestemt aksje.
+
+Lever en kompakt analyserapport på norsk i Markdown med:
+1. Kort om selskapet: hva de lever av, i én-to setninger
+2. Hva som taler FOR aksjen nå (3–5 punkter)
+3. Hva som taler MOT (3–5 punkter, vær like grundig her)
+4. Nøkkeltall du kjenner (P/E, gjeldsgrad, utbytte) — merk at de er per din kunnskaps-cutoff
+5. Teknisk bilde ut fra sanntidsdataene du får (trend, RSI, nivåer)
+6. Bull- og bear-kursmål 12 måneder frem, forankret i dagens kurs
+7. Konkrete nivåer: aktuell inngangssone, stop-loss-forslag
+8. Hva brukeren bør følge med på fremover (rapporter, hendelser, signaler)
+9. Eier brukeren aksjen: vurder posisjonen (holde/øke/redusere-resonnement)
+
+Regler: sanntidsdataene er fasit for dagens nivåer. Vær ærlig om usikkerhet, bruk intervaller, skriv «ukjent» der du ikke kan stå inne for tall. Start og avslutt med én linje om at dette er AI-generert research — ikke investeringsrådgivning."#;
+
+/// Kompakt JSON-kontekst om ett symbol: kurs, historikk-nøkkeltall, teknisk
+/// bilde og brukerens eventuelle posisjon.
+pub fn symbol_context(st: &UiState, symbol: &str) -> String {
+    let quote = st.quotes.get(symbol).map(|q| {
+        json!({"siste": q.last, "endring_i_dag_pct": q.change_pct(), "valuta": q.currency})
+    });
+
+    let hist = st.history.get(symbol).map(|h| {
+        let closes: Vec<f64> = h.iter().map(|&(_, p)| p).collect();
+        let year_ago = chrono::Utc::now().timestamp() as f64 - 365.0 * 86400.0;
+        let year: Vec<f64> = h.iter().filter(|(t, _)| *t >= year_ago).map(|&(_, p)| p).collect();
+        let hi = year.iter().cloned().fold(f64::MIN, f64::max);
+        let lo = year.iter().cloned().fold(f64::MAX, f64::min);
+        json!({
+            "hoyeste_52_uker": if hi > f64::MIN { Some(hi) } else { None },
+            "laveste_52_uker": if lo < f64::MAX { Some(lo) } else { None },
+            "rsi_14": crate::market::rsi(&closes, 14),
+            "antall_dager_historikk": closes.len(),
+        })
+    });
+
+    let uke = st.market.week.iter().find(|w| w.symbol == symbol).map(|w| {
+        json!({"uke_pct": w.week_pct, "rsi": w.rsi, "trend_opp": w.trend_up, "sving_pct_per_dag": w.range_pct})
+    });
+
+    let posisjon = st.positions.iter().find(|p| p.symbol == symbol).map(|p| {
+        json!({"antall": p.qty, "snittkurs": p.avg_price, "urealisert_gevinst": p.unrealized()})
+    });
+
+    json!({
+        "dato": chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        "symbol": symbol,
+        "merknad": "Kurser fra Yahoo Finance, ca. 15 min forsinket.",
+        "kurs": quote,
+        "historikk": hist,
+        "ukesanalyse": uke,
+        "brukerens_posisjon": posisjon,
+        "utbytte_siste_12mnd_per_aksje": st.dividends.get(symbol),
+    })
+    .to_string()
+}
+
+/// Kjør full screening: ett kall til Anthropic Messages API (Claude Opus 4.8).
 pub async fn analyze(api_key: &str, profile: &str, market_json: &str) -> Result<String> {
+    let user = format!(
+        "Min investeringsprofil:\n{profile}\n\nSanntidsdata fra appen min (JSON):\n{market_json}"
+    );
+    call_claude(api_key, SYSTEM_PROMPT, &user, 16000).await
+}
+
+/// Dypdykk i én aksje — kortere rapport, samme modell.
+pub async fn analyze_symbol(api_key: &str, symbol: &str, context_json: &str) -> Result<String> {
+    let user = format!(
+        "Gi meg et dypdykk i {symbol}.\n\nSanntidsdata fra appen min (JSON):\n{context_json}"
+    );
+    call_claude(api_key, SYMBOL_PROMPT, &user, 10000).await
+}
+
+async fn call_claude(api_key: &str, system: &str, user: &str, max_tokens: u32) -> Result<String> {
     let client = reqwest::Client::builder()
         // Grundige analyser kan ta flere minutter.
         .timeout(std::time::Duration::from_secs(600))
@@ -109,14 +182,12 @@ pub async fn analyze(api_key: &str, profile: &str, market_json: &str) -> Result<
 
     let body = json!({
         "model": MODEL,
-        "max_tokens": 16000,
+        "max_tokens": max_tokens,
         "thinking": {"type": "adaptive"},
-        "system": SYSTEM_PROMPT,
+        "system": system,
         "messages": [{
             "role": "user",
-            "content": format!(
-                "Min investeringsprofil:\n{profile}\n\nSanntidsdata fra appen min (JSON):\n{market_json}"
-            ),
+            "content": user,
         }],
     });
 

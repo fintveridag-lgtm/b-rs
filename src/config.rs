@@ -47,6 +47,18 @@ pub struct Config {
     pub notify: NotifyCfg,
     #[serde(default)]
     pub backtest: BacktestCfg,
+    #[serde(default)]
+    pub goal: GoalCfg,
+}
+
+/// Sparemål: «jeg vil ha X kr innen år Y» — vises som fremdriftslinje
+/// i Portefølje-fanen. amount = 0 betyr at målet er slått av.
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+pub struct GoalCfg {
+    #[serde(default)]
+    pub amount: f64,
+    #[serde(default)]
+    pub year: i32,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]

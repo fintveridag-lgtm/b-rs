@@ -48,7 +48,12 @@ Taster i terminalversjonen: `q` avslutt · `k` kill switch (kanseller + stopp ha
 | `broker/` | `Broker`-traiten + implementasjoner: `paper` (simulering), `ibkr` (aksjer, Interactive Brokers) og `revolutx` (krypto, Revolut X med Ed25519-signert REST) |
 | `marketdata` | Kurser og historikk fra Yahoo Finance (gratis, ~15 min forsinket; `.OL`-suffiks for Oslo Børs) |
 | `market` | Markedsskjermene: mest omsatte, daytrading-kandidater, fond/ETF-er og teknisk ukesanalyse |
-| `morgan` | 🧠 AI-analysesjefen: komplett screeningrapport (topp 10, P/E, gjeld, utbytte, kursmål, stop-loss) via Claude — krever `ANTHROPIC_API_KEY` |
+| `morgan` | 🧠 AI-analysesjefen: komplett screeningrapport (topp 10, P/E, gjeld, utbytte, kursmål, stop-loss) og dypdykk per aksje via Claude — krever `ANTHROPIC_API_KEY` |
+
+Automatikk i motoren: **limit-ordrer** («kjøp hvis kursen faller til X»),
+**spareavtaler** (fast kronebeløp samme dag hver måned), **ukesrapport** til
+mobilen fredag ettermiddag, og **sparemål** med fremdriftslinje i porteføljen.
+Nyheter per aksje vises under grafen (Yahoo Finance).
 | `strategy` | `Strategy`-traiten + `sma_cross`, `rsi` og `momentum` — byttes i appen |
 | `backtest` | Kjør en strategi over historikken og sammenlign med kjøp-og-hold |
 | `risk` | Harde grenser: maks ordreverdi, maks posisjon, ratebegrensning, tapsgrense — pluss stop-loss/take-profit/trailing stop per posisjon |

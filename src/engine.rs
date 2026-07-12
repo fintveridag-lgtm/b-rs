@@ -374,6 +374,16 @@ impl Engine {
         let equity = cash + positions.iter().map(|p| p.market_value()).sum::<f64>();
         self.risk.observe_equity(equity);
 
+        // 2b) Limit-ordrer: handle når nivået brytes. Utløste ordrer legges
+        //     i den manuelle køen og går gjennom risikoreglene lenger ned.
+        self.check_limit_orders(&fresh, &positions);
+
+        // 2c) Spareavtaler: månedlig kjøp på fast dag.
+        self.check_savings_plans(&fresh).await;
+
+        // 2d) Ukesrapport til mobilen fredag ettermiddag.
+        self.maybe_weekly_report(equity);
+
         // 3) Beskyttende exits: stop-loss / take-profit / trailing stop.
         //    Kjører også under strategipause (beskytter beholdningen),
         //    men aldri når kill switch er på.
@@ -544,6 +554,211 @@ impl Engine {
             st.push_equity(now.timestamp() as f64, equity);
             st.last_tick = Some(now);
         }
+    }
+
+    /// Sjekk ventende limit-ordrer mot ferske kurser. KJØP utløses når
+    /// kursen faller til/under nivået, SELG når den stiger til/over.
+    /// Utløste ordrer legges i den manuelle køen (risikosjekkes der).
+    fn check_limit_orders(&mut self, fresh: &[Quote], positions: &[crate::types::Position]) {
+        let mut triggered: Vec<(crate::state::LimitOrder, Quote)> = Vec::new();
+        {
+            let mut st = self.state.lock().unwrap();
+            st.limit_orders.retain(|lo| {
+                let Some(q) = fresh.iter().find(|q| q.symbol == lo.symbol) else { return true };
+                let hit = match lo.side {
+                    Side::Buy => q.last <= lo.level,
+                    Side::Sell => q.last >= lo.level,
+                };
+                if hit {
+                    triggered.push((lo.clone(), q.clone()));
+                }
+                !hit
+            });
+        }
+        if triggered.is_empty() {
+            return;
+        }
+        for (lo, q) in &triggered {
+            let Some(px) = self.base_price(q) else {
+                self.log(format!(
+                    "💤 Limit-ordre for {} utløst, men valutakursen mangler — ordren er fjernet.",
+                    lo.symbol
+                ));
+                continue;
+            };
+            // Beløpsbaserte ordrer regnes om til antall på utløsningskursen.
+            let mut qty = if lo.qty > 0.0 {
+                lo.qty
+            } else if crate::types::is_crypto(&lo.symbol) {
+                lo.amount_kr / px
+            } else {
+                (lo.amount_kr / px).floor()
+            };
+            if lo.side == Side::Sell {
+                let held = positions.iter().find(|p| p.symbol == lo.symbol).map_or(0.0, |p| p.qty);
+                qty = qty.min(held);
+            }
+            if qty <= 0.0 {
+                self.log(format!(
+                    "💤 Limit-ordre for {} utløst, men ga 0 i antall (beløp {:.0} kr, kurs {:.2}) — fjernet.",
+                    lo.symbol, lo.amount_kr, q.last
+                ));
+                continue;
+            }
+            let msg = format!(
+                "💤 Limit-ordre utløst: {} {} x{:.4} — kursen nådde {:.2} (nivå {:.2}).",
+                lo.side, lo.symbol, qty, q.last, lo.level
+            );
+            self.log(msg.clone());
+            self.notify(msg);
+            let mut st = self.state.lock().unwrap();
+            st.toast(format!("💤 Limit: {} {} utløst.", lo.side, lo.symbol));
+            st.manual_orders.push_back((lo.symbol.clone(), lo.side, qty));
+        }
+        let snapshot = self.state.lock().unwrap().limit_orders.clone();
+        let _ = self.store.save_limit_orders(&snapshot);
+    }
+
+    /// Spareavtaler: kjøp for fast beløp når måneden er ny og dagen er nådd.
+    async fn check_savings_plans(&mut self, fresh: &[Quote]) {
+        use chrono::Datelike;
+        let now = chrono::Local::now();
+        let month_key = now.format("%Y-%m").to_string();
+        let day = now.day();
+
+        let due: Vec<crate::state::SavingsPlan> = {
+            let mut st = self.state.lock().unwrap();
+            let mut due = Vec::new();
+            for p in st.savings_plans.iter_mut() {
+                if p.last_run != month_key && day >= p.day {
+                    p.last_run = month_key.clone();
+                    due.push(p.clone());
+                }
+            }
+            due
+        };
+        if due.is_empty() {
+            return;
+        }
+
+        for plan in &due {
+            // Kursen kan mangle første tikkene etter oppstart — da henter vi den.
+            let quote = match fresh.iter().find(|q| q.symbol == plan.symbol) {
+                Some(q) => Some(q.clone()),
+                None => self.market.quote(&plan.symbol).await.ok(),
+            };
+            let px = quote.as_ref().and_then(|q| self.base_price(q));
+            let (Some(q), Some(px)) = (quote, px) else {
+                // Ikke marker som kjørt likevel — prøv igjen neste tikk.
+                let mut st = self.state.lock().unwrap();
+                if let Some(p) = st
+                    .savings_plans
+                    .iter_mut()
+                    .find(|p| p.symbol == plan.symbol && p.day == plan.day)
+                {
+                    p.last_run.clear();
+                }
+                continue;
+            };
+            let qty = if crate::types::is_crypto(&plan.symbol) {
+                plan.amount_kr / px
+            } else {
+                (plan.amount_kr / px).floor()
+            };
+            if qty <= 0.0 {
+                let msg = format!(
+                    "📅 Spareavtale {}: {:.0} kr rekker ikke til én aksje (kurs {:.2}) — hoppet over denne måneden.",
+                    plan.symbol, plan.amount_kr, q.last
+                );
+                self.log(msg.clone());
+                self.notify(msg);
+                continue;
+            }
+            let msg = format!(
+                "📅 Spareavtale: kjøper {} x{:.4} for ca. {:.0} kr (dag {} i måneden).",
+                plan.symbol, qty, plan.amount_kr, plan.day
+            );
+            self.log(msg.clone());
+            self.notify(msg);
+            let mut st = self.state.lock().unwrap();
+            st.toast(format!("📅 Spareavtale: kjøper {}.", plan.symbol));
+            st.manual_orders.push_back((plan.symbol.clone(), Side::Buy, qty));
+        }
+        let snapshot = self.state.lock().unwrap().savings_plans.clone();
+        let _ = self.store.save_savings_plans(&snapshot);
+    }
+
+    /// Ukesrapport: fredag fra kl. 16 — porteføljens uke oppsummert i én
+    /// melding. Ukestart-egenkapitalen lagres første tikk hver ISO-uke.
+    fn maybe_weekly_report(&mut self, equity: f64) {
+        use chrono::{Datelike, Timelike, Weekday};
+        if equity <= 0.0 {
+            return;
+        }
+        let now = chrono::Local::now();
+        let week_key = format!("{}-W{:02}", now.iso_week().year(), now.iso_week().week());
+
+        // Snapshot av egenkapitalen ved ukestart.
+        let start_equity = match self.store.meta_get("week_start_equity") {
+            Some(v) if v.starts_with(&week_key) => {
+                v.split(':').nth(1).and_then(|s| s.parse::<f64>().ok()).unwrap_or(equity)
+            }
+            _ => {
+                let _ = self.store.meta_set("week_start_equity", &format!("{week_key}:{equity}"));
+                equity
+            }
+        };
+
+        if now.weekday() != Weekday::Fri || now.hour() < 16 {
+            return;
+        }
+        if self.store.meta_get("last_weekly_report").as_deref() == Some(week_key.as_str()) {
+            return;
+        }
+        let _ = self.store.meta_set("last_weekly_report", &week_key);
+
+        let diff = equity - start_equity;
+        let pct = if start_equity > 0.0 { diff / start_equity * 100.0 } else { 0.0 };
+
+        // Beste og svakeste beholdning denne uken (kurs nå mot ~1 uke siden).
+        type SymbolPct = Option<(String, f64)>;
+        let (mut best, mut worst): (SymbolPct, SymbolPct) = (None, None);
+        {
+            let st = self.state.lock().unwrap();
+            let week_ago = chrono::Utc::now().timestamp() as f64 - 7.0 * 86400.0;
+            for p in &st.positions {
+                let Some(h) = st.history.get(&p.symbol) else { continue };
+                let Some(&(_, then)) = h.iter().find(|(t, _)| *t >= week_ago) else { continue };
+                let Some(&(_, now_px)) = h.back() else { continue };
+                if then <= 0.0 {
+                    continue;
+                }
+                let w_pct = (now_px / then - 1.0) * 100.0;
+                if best.as_ref().is_none_or(|(_, b)| w_pct > *b) {
+                    best = Some((p.symbol.clone(), w_pct));
+                }
+                if worst.as_ref().is_none_or(|(_, w)| w_pct < *w) {
+                    worst = Some((p.symbol.clone(), w_pct));
+                }
+            }
+        }
+
+        let mut msg = format!(
+            "📊 Ukesrapport: porteføljen {}{:.1} % ({}{:.0} kr) denne uken. Egenkapital: {:.0} kr.",
+            if pct >= 0.0 { "+" } else { "" },
+            pct,
+            if diff >= 0.0 { "+" } else { "" },
+            diff,
+            equity
+        );
+        if let Some((s, p)) = best {
+            msg.push_str(&format!(" Beste: {s} {p:+.1} %."));
+        }
+        if let Some((s, p)) = worst {
+            msg.push_str(&format!(" Svakeste: {s} {p:+.1} %."));
+        }
+        self.log(msg.clone());
+        self.notify(msg);
     }
 
     async fn place(
