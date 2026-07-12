@@ -1,5 +1,7 @@
 use crate::backtest::{self, BacktestResult};
-use crate::state::{Flags, SharedState, UiState};
+use crate::pnl::{self, RealizedTrade};
+use crate::state::{Alarm, Flags, SharedState, UiState};
+use crate::store::Store;
 use crate::strategy;
 use crate::types::Side;
 use anyhow::Result;
@@ -80,7 +82,7 @@ impl ChartRange {
 }
 
 /// Grafisk vindu med knapper og kursgraf. Blokkerer til vinduet lukkes.
-pub fn run(state: SharedState, flags: Arc<Flags>) -> Result<()> {
+pub fn run(state: SharedState, flags: Arc<Flags>, store: Arc<Store>) -> Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 850.0])
         .with_min_inner_size([980.0, 640.0])
@@ -95,6 +97,7 @@ pub fn run(state: SharedState, flags: Arc<Flags>) -> Result<()> {
     let app = App {
         state,
         flags: flags.clone(),
+        store,
         view: View::Handel,
         selected: None,
         range: ChartRange::ThreeMonths,
@@ -102,7 +105,11 @@ pub fn run(state: SharedState, flags: Arc<Flags>) -> Result<()> {
         trade_qty: 10.0,
         strategy_choice: String::new(),
         backtest: None,
+        compare: None,
         order_filter: OrderFilter::Alle,
+        alarm_level: 0.0,
+        alarm_above: false,
+        realized_cache: (usize::MAX, Vec::new()),
     };
     let result = eframe::run_native(
         "b-rs",
@@ -197,6 +204,7 @@ fn load_icon() -> Option<egui::IconData> {
 struct App {
     state: SharedState,
     flags: Arc<Flags>,
+    store: Arc<Store>,
     view: View,
     selected: Option<String>,
     range: ChartRange,
@@ -204,7 +212,25 @@ struct App {
     trade_qty: f64,
     strategy_choice: String,
     backtest: Option<std::result::Result<BacktestResult, String>>,
+    /// Resultat av «sammenlign strategier» — én rad per strategi.
+    compare: Option<Vec<std::result::Result<BacktestResult, String>>>,
     order_filter: OrderFilter,
+    alarm_level: f64,
+    alarm_above: bool,
+    /// (antall transaksjoner da cachen ble bygget, realiserte handler).
+    realized_cache: (usize, Vec<RealizedTrade>),
+}
+
+impl App {
+    /// Realiserte handler (FIFO), gjenberegnet når nye transaksjoner kommer.
+    fn realized(&mut self, st: &UiState) -> &[RealizedTrade] {
+        let marker = st.transactions.len();
+        if self.realized_cache.0 != marker {
+            let fills = self.store.fills_chronological().unwrap_or_default();
+            self.realized_cache = (marker, pnl::realized_fifo(&fills));
+        }
+        &self.realized_cache.1
+    }
 }
 
 impl eframe::App for App {
@@ -230,7 +256,7 @@ impl eframe::App for App {
             }
             View::Portefolje => self.portfolio_view(ctx, &st),
             View::Ordrer => self.orders_view(ctx, &st),
-            View::Transaksjoner => self.transactions_view(ctx, &st),
+            View::Transaksjoner => self.transactions_view(ctx, &mut st),
             View::Marked => self.market_view(ctx, &mut st),
             View::Analyse => self.analyse_view(ctx, &st),
             View::Kalender => self.calendar_view(ctx, &st),
@@ -396,8 +422,88 @@ impl App {
                         st.strategy_request = Some(self.strategy_choice.clone());
                     }
                 });
-                if ui.button("🧪 Backtest på valgt symbol (2 år)").clicked() {
-                    self.backtest = Some(run_backtest(self.selected.as_deref(), &self.strategy_choice, st));
+                // Strategi-overstyring for valgt symbol.
+                if let Some(sel) = self.selected.clone() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("For {sel}:")).small());
+                        let current = st
+                            .symbol_strategy
+                            .get(&sel)
+                            .cloned()
+                            .unwrap_or_else(|| "standard".to_string());
+                        egui::ComboBox::from_id_salt("symbolstrategi")
+                            .selected_text(&current)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(current == "standard", "standard").clicked() {
+                                    st.symbol_strategy.remove(&sel);
+                                }
+                                for name in strategy::AVAILABLE {
+                                    if ui.selectable_label(current == name, name).clicked() {
+                                        st.symbol_strategy.insert(sel.clone(), name.to_string());
+                                        st.log(format!("{sel} bruker nå strategien {name}."));
+                                    }
+                                }
+                            });
+                    });
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("🧪 Backtest (2 år)").clicked() {
+                        self.backtest = Some(run_backtest(self.selected.as_deref(), &self.strategy_choice, st));
+                        self.compare = None;
+                    }
+                    if ui.button("⚖ Sammenlign alle").clicked() {
+                        self.compare = Some(
+                            strategy::AVAILABLE
+                                .iter()
+                                .map(|name| run_backtest(self.selected.as_deref(), name, st))
+                                .collect(),
+                        );
+                        self.backtest = None;
+                    }
+                });
+
+                // Sammenligningstabell: alle strategier på valgt symbol.
+                if let Some(results) = &self.compare {
+                    let best = results
+                        .iter()
+                        .filter_map(|r| r.as_ref().ok())
+                        .map(|r| r.return_pct)
+                        .fold(f64::MIN, f64::max);
+                    egui::Grid::new("sammenlign").striped(true).min_col_width(52.0).show(ui, |ui| {
+                        for h in ["Strategi", "Avkastning", "Fall", "Handler", "Treff"] {
+                            ui.label(RichText::new(h).strong().color(GRAY));
+                        }
+                        ui.end_row();
+                        for r in results {
+                            match r {
+                                Ok(r) => {
+                                    let is_best = (r.return_pct - best).abs() < 1e-9;
+                                    let name = if is_best {
+                                        RichText::new(format!("🏆 {}", r.strategy)).color(GREEN).strong()
+                                    } else {
+                                        RichText::new(r.strategy.clone())
+                                    };
+                                    ui.label(name);
+                                    let color = if r.return_pct >= 0.0 { GREEN } else { RED };
+                                    ui.label(RichText::new(format!("{:+.1} %", r.return_pct)).color(color));
+                                    ui.label(RichText::new(format!("{:.1} %", r.max_drawdown_pct)).color(RED));
+                                    ui.label(format!("{}", r.trades.len()));
+                                    let hits = if r.trades.is_empty() {
+                                        "–".to_string()
+                                    } else {
+                                        format!("{}/{}", r.wins(), r.trades.len())
+                                    };
+                                    ui.label(hits);
+                                    ui.end_row();
+                                }
+                                Err(e) => {
+                                    ui.label(RichText::new(e).color(RED).small());
+                                    ui.end_row();
+                                }
+                            }
+                        }
+                    });
+                    ui.small("Samme periode og kostnader for alle. 🏆 = best avkastning.");
                 }
                 match &self.backtest {
                     Some(Ok(r)) => {
@@ -488,6 +594,73 @@ impl App {
                     ui.small("Utføres på neste tikk, gjennom risikoreglene.");
                 } else {
                     ui.small("Velg et symbol i watchlisten først.");
+                }
+
+                // Kursalarmer
+                ui.add_space(10.0);
+                ui.separator();
+                section_heading(ui, "🔔 Alarmer");
+                if let Some(sel) = self.selected.clone() {
+                    if self.alarm_level <= 0.0 {
+                        if let Some(q) = st.quotes.get(&sel) {
+                            self.alarm_level = (q.last * 100.0).round() / 100.0;
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&sel).strong());
+                        let dir_text = if self.alarm_above { "over ▲" } else { "under ▼" };
+                        if ui.button(dir_text).clicked() {
+                            self.alarm_above = !self.alarm_above;
+                        }
+                        ui.add(
+                            egui::DragValue::new(&mut self.alarm_level)
+                                .range(0.0..=10_000_000.0)
+                                .speed(0.5)
+                                .max_decimals(2),
+                        );
+                        if ui.button("Legg til").clicked() && self.alarm_level > 0.0 {
+                            st.alarms.push(Alarm {
+                                symbol: sel.clone(),
+                                level: self.alarm_level,
+                                above: self.alarm_above,
+                                triggered: false,
+                            });
+                            let _ = self.store.save_alarms(&st.alarms);
+                            st.log(format!(
+                                "Alarm lagt til: {sel} {} {:.2}",
+                                if self.alarm_above { "over" } else { "under" },
+                                self.alarm_level
+                            ));
+                        }
+                    });
+                } else {
+                    ui.small("Velg et symbol i watchlisten først.");
+                }
+                let mut delete: Option<usize> = None;
+                for (i, a) in st.alarms.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("🗑").clicked() {
+                            delete = Some(i);
+                        }
+                        let text = format!(
+                            "{} {} {:.2}",
+                            a.symbol,
+                            if a.above { "over" } else { "under" },
+                            a.level
+                        );
+                        if a.triggered {
+                            ui.label(RichText::new(format!("{text} — utløst ✔")).color(GRAY).strikethrough());
+                        } else {
+                            ui.label(RichText::new(text).color(YELLOW));
+                        }
+                    });
+                }
+                if let Some(i) = delete {
+                    st.alarms.remove(i);
+                    let _ = self.store.save_alarms(&st.alarms);
+                }
+                if st.alarms.is_empty() {
+                    ui.small("Ingen alarmer — varsles i logg og på mobil.");
                 }
 
                 ui.add_space(10.0);
@@ -726,7 +899,8 @@ impl App {
 }
 
 impl App {
-    fn portfolio_view(&self, ctx: &egui::Context, st: &UiState) {
+    fn portfolio_view(&mut self, ctx: &egui::Context, st: &UiState) {
+        let realized = self.realized(st).to_vec();
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().id_salt("portefolje_scroll").show(ui, |ui| {
                 ui.add_space(4.0);
@@ -828,6 +1002,23 @@ impl App {
                         }
                     });
 
+                    // Realisert gevinst/tap (FIFO) — det skattbare.
+                    ui.add_space(10.0);
+                    section_heading(ui, "✅ Realisert gevinst/tap");
+                    let this_year = chrono::Utc::now().format("%Y").to_string().parse().unwrap_or(0);
+                    let year_gain = pnl::total_gain(&realized, this_year);
+                    let all_gain = pnl::total_gain(&realized, 0);
+                    ui.horizontal(|ui| {
+                        ui.label(format!("I år ({this_year}):"));
+                        ui.label(RichText::new(format!("{}{} kr", plus(year_gain), fmt_thousands(year_gain))).color(updown(year_gain)).strong());
+                        ui.separator();
+                        ui.label("Totalt:");
+                        ui.label(RichText::new(format!("{}{} kr", plus(all_gain), fmt_thousands(all_gain))).color(updown(all_gain)).strong());
+                        ui.separator();
+                        ui.label(format!("{} realiserte salg", realized.len()));
+                    });
+                    ui.small("FIFO-beregnet fra fylte ordrer — eksporter skatterapport under 💳 Transaksjoner.");
+
                     // Forventet utbytte samlet (basert på siste 12 mnd per aksje).
                     let total_div: f64 = st
                         .positions
@@ -907,7 +1098,8 @@ impl App {
         });
     }
 
-    fn transactions_view(&self, ctx: &egui::Context, st: &UiState) {
+    fn transactions_view(&mut self, ctx: &egui::Context, st: &mut UiState) {
+        let realized = self.realized(st).to_vec();
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(4.0);
             ui.heading(RichText::new("💳 Transaksjoner").strong());
@@ -915,6 +1107,28 @@ impl App {
                 "Komplett historikk fra databasen ({} transaksjoner) — også fra tidligere økter.",
                 st.transactions.len()
             ));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("📤 Eksporter skatterapport (CSV)").clicked() {
+                    let path = std::path::Path::new("b-rs-realisert-gevinst.csv");
+                    match pnl::export_realized_csv(&realized, path) {
+                        Ok(()) => st.log(format!(
+                            "Skatterapport skrevet til {} ({} realiserte salg).",
+                            path.display(),
+                            realized.len()
+                        )),
+                        Err(e) => st.log(format!("Eksport feilet: {e:#}")),
+                    }
+                }
+                if ui.button("📤 Eksporter alle transaksjoner (CSV)").clicked() {
+                    let path = std::path::Path::new("b-rs-transaksjoner.csv");
+                    match export_transactions_csv(&self.store, path) {
+                        Ok(n) => st.log(format!("{n} transaksjoner skrevet til {}.", path.display())),
+                        Err(e) => st.log(format!("Eksport feilet: {e:#}")),
+                    }
+                }
+                ui.label(RichText::new("(semikolon-separert — åpnes rett i Excel)").small().color(GRAY));
+            });
             ui.add_space(6.0);
             egui::ScrollArea::vertical().id_salt("tx_view").show(ui, |ui| {
                 egui::Grid::new("tx_grid").striped(true).min_col_width(60.0).show(ui, |ui| {
@@ -1184,6 +1398,28 @@ fn fmt_turnover(v: f64) -> String {
     } else {
         format!("{:.0} mill", v / 1e6)
     }
+}
+
+/// Skriv hele transaksjonshistorikken som CSV; returnerer antall rader.
+fn export_transactions_csv(store: &Store, path: &std::path::Path) -> anyhow::Result<usize> {
+    let txs = store.recent_orders(1_000_000)?;
+    let mut out = String::from("Tidspunkt;Side;Symbol;Antall;Kurs;Beløp;Status;Megler;Merknad\n");
+    for t in &txs {
+        out.push_str(&format!(
+            "{};{};{};{:.4};{:.4};{:.2};{};{};{}\n",
+            t.ts,
+            t.side,
+            t.symbol,
+            t.qty,
+            t.price,
+            t.qty * t.price,
+            t.status,
+            t.broker,
+            t.note.replace(';', ",")
+        ));
+    }
+    std::fs::write(path, out)?;
+    Ok(txs.len())
 }
 
 /// Kjør backtest på valgt symbol med valgt strategi over dagsstolpene.

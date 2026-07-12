@@ -2,13 +2,14 @@ use crate::broker::Broker;
 use crate::config::Config;
 use crate::marketdata::Yahoo;
 use crate::notify::Notifier;
-use crate::risk::{protective_exit, RiskManager, RiskVerdict};
+use crate::risk::{protective_exit, trailing_exit, RiskManager, RiskVerdict};
 use crate::state::{Flags, SharedState};
 use crate::store::Store;
 use crate::strategy::Strategy;
 use crate::types::{OrderRequest, OrderStatus, Side};
+use anyhow::Result;
 use chrono::Utc;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +20,11 @@ pub struct Engine {
     cfg: Config,
     broker: Arc<dyn Broker>,
     market: Yahoo,
-    strategy: Box<dyn Strategy>,
+    /// Én strategiinstans per strateginavn — hver instans håndterer alle
+    /// symbolene som er tilordnet den (standard eller per-aksje-valg).
+    strategies: HashMap<String, Box<dyn Strategy>>,
+    /// (strateginavn, symbol)-par som er sådd med historikk.
+    strategy_seeded: HashSet<(String, String)>,
     risk: RiskManager,
     store: Arc<Store>,
     state: SharedState,
@@ -31,6 +36,8 @@ pub struct Engine {
     /// Symboler med utestående beskyttende salg (stop-loss/take-profit),
     /// så vi ikke sender samme salg flere ganger mens ordren fylles.
     protected: HashSet<String>,
+    /// Høyeste kurs per posisjon siden kjøp — grunnlag for trailing stop.
+    peaks: HashMap<String, f64>,
 }
 
 impl Engine {
@@ -41,18 +48,23 @@ impl Engine {
         cfg: Config,
         broker: Arc<dyn Broker>,
         market: Yahoo,
-        strategy: Box<dyn Strategy>,
         store: Arc<Store>,
         state: SharedState,
         flags: Arc<Flags>,
         notifier: Option<Arc<Notifier>>,
-    ) -> Self {
+    ) -> Result<Self> {
+        // Bygg standardstrategien med én gang så et ukjent navn i konfigen
+        // stopper appen ved oppstart, ikke midt i en handelsdag.
+        let default = crate::strategy::build(&cfg.strategy)?;
+        let mut strategies = HashMap::new();
+        strategies.insert(cfg.strategy.name.clone(), default);
         let risk = RiskManager::new(cfg.risk.clone());
-        Self {
+        Ok(Self {
             cfg,
             broker,
             market,
-            strategy,
+            strategies,
+            strategy_seeded: HashSet::new(),
             risk,
             store,
             state,
@@ -61,7 +73,8 @@ impl Engine {
             was_killed: false,
             seeded: HashSet::new(),
             protected: HashSet::new(),
-        }
+            peaks: HashMap::new(),
+        })
     }
 
     /// Send push-varsel til mobil i bakgrunnen (blokkerer aldri tikken).
@@ -93,8 +106,6 @@ impl Engine {
             // 2 år: nok til grafens "Alt"-visning og ærlig backtesting.
             match self.market.history_daily(&symbol, "2y").await {
                 Ok(bars) if !bars.is_empty() => {
-                    let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
-                    self.strategy.seed(&symbol, &closes);
                     {
                         let mut st = self.state.lock().unwrap();
                         for b in &bars {
@@ -121,14 +132,14 @@ impl Engine {
             "Engine startet — modus={}, megler={}, strategi={}",
             self.cfg.mode,
             self.broker.name(),
-            self.strategy.name()
+            self.cfg.strategy.name
         ));
         // Oppstartsvarsel — bekrefter samtidig at varselkanalen fungerer.
         self.notify(format!(
             "Startet i {}-modus (megler: {}, strategi: {}).",
             self.cfg.mode,
             self.broker.name(),
-            self.strategy.name()
+            self.cfg.strategy.name
         ));
         self.ensure_seeded().await;
 
@@ -162,26 +173,67 @@ impl Engine {
         self.was_killed = killed;
     }
 
-    /// Bytt strategi på forespørsel fra GUI-et: bygg den nye og så den med
-    /// historikken vi allerede har, så den er varm fra første tikk.
+    /// Bytt standardstrategi på forespørsel fra GUI-et. Instanser bygges
+    /// og sås lat per symbol i signal-løkken.
     fn handle_strategy_switch(&mut self) {
         let request = self.state.lock().unwrap().strategy_request.take();
         let Some(name) = request else { return };
-        let mut cfg = self.cfg.strategy.clone();
-        cfg.name = name.clone();
-        match crate::strategy::build(&cfg) {
-            Ok(mut fresh) => {
-                let history = self.state.lock().unwrap().history.clone();
-                for (symbol, points) in history {
-                    let closes: Vec<f64> = points.iter().map(|&(_, p)| p).collect();
-                    fresh.seed(&symbol, &closes);
-                }
-                self.strategy = fresh;
-                self.state.lock().unwrap().strategy_name = name.clone();
-                self.log(format!("Strategi byttet til {name}."));
-            }
-            Err(e) => self.log(format!("Kunne ikke bytte strategi: {e:#}")),
+        if self.ensure_strategy(&name) {
+            self.state.lock().unwrap().strategy_name = name.clone();
+            self.log(format!("Standardstrategi byttet til {name}."));
         }
+    }
+
+    /// Sørg for at en strategiinstans finnes; false hvis navnet er ukjent.
+    fn ensure_strategy(&mut self, name: &str) -> bool {
+        if self.strategies.contains_key(name) {
+            return true;
+        }
+        let mut cfg = self.cfg.strategy.clone();
+        cfg.name = name.to_string();
+        match crate::strategy::build(&cfg) {
+            Ok(s) => {
+                self.strategies.insert(name.to_string(), s);
+                true
+            }
+            Err(e) => {
+                self.log(format!("Ukjent strategi {name}: {e:#}"));
+                false
+            }
+        }
+    }
+
+    /// Hent signal for et symbol fra riktig strategi (per-aksje-valg eller
+    /// standard), med lat såing av historikk første gang paret brukes.
+    /// Returnerer signal + strateginavnet det kom fra.
+    fn signal_for(&mut self, symbol: &str, price: f64) -> Option<(Side, String)> {
+        let name = {
+            let st = self.state.lock().unwrap();
+            st.symbol_strategy
+                .get(symbol)
+                .cloned()
+                .unwrap_or_else(|| st.strategy_name.clone())
+        };
+        if !self.ensure_strategy(&name) {
+            return None;
+        }
+        let key = (name.clone(), symbol.to_string());
+        if !self.strategy_seeded.contains(&key) {
+            let closes: Vec<f64> = self
+                .state
+                .lock()
+                .unwrap()
+                .history
+                .get(symbol)
+                .map(|h| h.iter().map(|&(_, p)| p).collect())
+                .unwrap_or_default();
+            if let Some(s) = self.strategies.get_mut(&name) {
+                s.seed(symbol, &closes);
+            }
+            self.strategy_seeded.insert(key);
+        }
+        let side = self.strategies.get_mut(&name)?.on_price(symbol, price)?;
+        Some((side, name))
     }
 
     async fn tick(&mut self) {
@@ -201,6 +253,41 @@ impl Engine {
             }
         }
 
+        // 1b) Kursalarmer: varsle når brukerens nivåer brytes.
+        {
+            let mut fired: Vec<String> = Vec::new();
+            let mut changed = false;
+            let alarms_snapshot = {
+                let mut st = self.state.lock().unwrap();
+                for a in st.alarms.iter_mut() {
+                    if a.triggered {
+                        continue;
+                    }
+                    let Some(q) = fresh.iter().find(|q| q.symbol == a.symbol) else { continue };
+                    let hit = if a.above { q.last >= a.level } else { q.last <= a.level };
+                    if hit {
+                        a.triggered = true;
+                        changed = true;
+                        fired.push(format!(
+                            "🔔 Alarm: {} {} {:.2} (kurs nå {:.2})",
+                            a.symbol,
+                            if a.above { "over" } else { "under" },
+                            a.level,
+                            q.last
+                        ));
+                    }
+                }
+                if changed { Some(st.alarms.clone()) } else { None }
+            };
+            if let Some(alarms) = alarms_snapshot {
+                let _ = self.store.save_alarms(&alarms);
+                for msg in fired {
+                    self.log(msg.clone());
+                    self.notify(msg);
+                }
+            }
+        }
+
         // 2) Posisjoner og egenkapital fra megleren.
         let positions = match self.broker.positions().await {
             Ok(p) => p,
@@ -213,21 +300,38 @@ impl Engine {
         let equity = cash + positions.iter().map(|p| p.market_value()).sum::<f64>();
         self.risk.observe_equity(equity);
 
-        // 3) Beskyttende exits: stop-loss / take-profit per posisjon.
+        // 3) Beskyttende exits: stop-loss / take-profit / trailing stop.
         //    Kjører også under strategipause (beskytter beholdningen),
         //    men aldri når kill switch er på.
         self.protected
             .retain(|s| positions.iter().any(|p| p.symbol == *s && p.qty > 1e-9));
+        // Oppdater toppnivåer for trailing stop.
+        self.peaks
+            .retain(|s, _| positions.iter().any(|p| p.symbol == *s && p.qty > 1e-9));
+        for p in &positions {
+            if p.qty <= 0.0 {
+                continue;
+            }
+            let last = fresh.iter().find(|q| q.symbol == p.symbol).map_or(p.last, |q| q.last);
+            let peak = self.peaks.entry(p.symbol.clone()).or_insert(p.avg_price.max(last));
+            *peak = peak.max(last);
+        }
         if !self.flags.killed() {
             let sl = self.cfg.risk.stop_loss_pct;
             let tp = self.cfg.risk.take_profit_pct;
+            let trail = self.cfg.risk.trailing_stop_pct;
             let mut exits = Vec::new();
             for p in &positions {
                 if p.qty <= 0.0 || self.protected.contains(&p.symbol) {
                     continue;
                 }
                 let Some(q) = fresh.iter().find(|q| q.symbol == p.symbol) else { continue };
-                if let Some(reason) = protective_exit(p.avg_price, q.last, sl, tp) {
+                let reason = protective_exit(p.avg_price, q.last, sl, tp).or_else(|| {
+                    self.peaks
+                        .get(&p.symbol)
+                        .and_then(|&peak| trailing_exit(peak, q.last, trail))
+                });
+                if let Some(reason) = reason {
                     exits.push((p.symbol.clone(), p.qty, q.last, reason));
                 }
             }
@@ -281,7 +385,7 @@ impl Engine {
         // 5) Strategisignaler → risikosjekk → ordre.
         if !self.flags.killed() && !self.flags.paused() {
             for q in &fresh {
-                let Some(side) = self.strategy.on_price(&q.symbol, q.last) else {
+                let Some((side, strat_name)) = self.signal_for(&q.symbol, q.last) else {
                     continue;
                 };
                 let held = positions
@@ -312,7 +416,7 @@ impl Engine {
                         }
                     }
                     RiskVerdict::Ok => {
-                        let note = format!("signal fra {}", self.strategy.name());
+                        let note = format!("signal fra {strat_name}");
                         let _ = self.place(&q.symbol, side, qty, q.last, &note).await;
                     }
                 }

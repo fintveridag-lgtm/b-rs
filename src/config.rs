@@ -150,6 +150,10 @@ pub struct RiskCfg {
     /// Sikre gevinst automatisk ved +X % fra kjøpskurs (0 = av).
     #[serde(default)]
     pub take_profit_pct: f64,
+    /// Trailing stop: selg hvis kursen faller X % fra høyeste nivå etter
+    /// kjøp — beskytter gevinst som allerede er opparbeidet (0 = av).
+    #[serde(default)]
+    pub trailing_stop_pct: f64,
 }
 
 impl Default for RiskCfg {
@@ -161,6 +165,7 @@ impl Default for RiskCfg {
             max_daily_loss: default_max_daily_loss(),
             stop_loss_pct: default_stop_loss_pct(),
             take_profit_pct: 0.0,
+            trailing_stop_pct: 0.0,
         }
     }
 }

@@ -46,6 +46,7 @@ max_orders_per_min = 4        # ratebegrensning
 max_daily_loss = 5000.0       # stopp all handel ved dette tapet
 stop_loss_pct = 8.0           # selg posisjon automatisk ved −8 % fra kjøpskurs (0 = av)
 take_profit_pct = 0.0         # sikre gevinst automatisk ved +X % (0 = av)
+trailing_stop_pct = 0.0       # selg ved −X % fra HØYESTE kurs etter kjøp (0 = av)
 
 # Interactive Brokers — kreves bare når broker = "ibkr" og mode = "live".
 # Forutsetter at Client Portal Gateway kjører lokalt og at du har logget inn

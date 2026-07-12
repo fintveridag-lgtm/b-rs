@@ -75,6 +75,21 @@ pub struct UiState {
     pub calendar: Vec<crate::calendar::CalendarEvent>,
     /// Feilmelding hvis kalenderdata ikke kunne hentes.
     pub calendar_note: Option<String>,
+    /// Brukerdefinerte kursalarmer (lagres i databasen).
+    pub alarms: Vec<Alarm>,
+    /// Strategi-overstyring per symbol; symboler uten oppslag bruker
+    /// standardstrategien (strategy_name).
+    pub symbol_strategy: BTreeMap<String, String>,
+}
+
+/// Brukerdefinert kursalarm — varsler mobil/logg når nivået brytes.
+#[derive(Debug, Clone)]
+pub struct Alarm {
+    pub symbol: String,
+    pub level: f64,
+    /// true = varsle når kursen går OVER nivået, false = UNDER.
+    pub above: bool,
+    pub triggered: bool,
 }
 
 /// Én rad i transaksjonshistorikken — display-klar.
@@ -121,6 +136,8 @@ impl UiState {
             transactions: Vec::new(),
             calendar: Vec::new(),
             calendar_note: None,
+            alarms: Vec::new(),
+            symbol_strategy: BTreeMap::new(),
         }
     }
 

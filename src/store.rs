@@ -1,4 +1,5 @@
-use crate::state::TxRow;
+use crate::pnl::Fill;
+use crate::state::{Alarm, TxRow};
 use crate::types::{Order, Position};
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -37,6 +38,12 @@ impl Store {
                 symbol TEXT PRIMARY KEY,
                 qty REAL NOT NULL,
                 avg_price REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS alarms (
+                symbol TEXT NOT NULL,
+                level REAL NOT NULL,
+                above INTEGER NOT NULL,
+                triggered INTEGER NOT NULL
             );",
         )?;
         Ok(Self { conn: Mutex::new(conn) })
@@ -113,6 +120,61 @@ impl Store {
             .filter_map(|r| r.ok())
             .collect();
         Ok(Some((cash, positions)))
+    }
+
+    /// Lagre alle alarmer (erstatter det som ligger der).
+    pub fn save_alarms(&self, alarms: &[Alarm]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM alarms", [])?;
+        for a in alarms {
+            tx.execute(
+                "INSERT INTO alarms (symbol, level, above, triggered) VALUES (?1, ?2, ?3, ?4)",
+                params![a.symbol, a.level, a.above as i32, a.triggered as i32],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn load_alarms(&self) -> Result<Vec<Alarm>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT symbol, level, above, triggered FROM alarms")?;
+        let alarms = stmt
+            .query_map([], |r| {
+                Ok(Alarm {
+                    symbol: r.get(0)?,
+                    level: r.get(1)?,
+                    above: r.get::<_, i32>(2)? != 0,
+                    triggered: r.get::<_, i32>(3)? != 0,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(alarms)
+    }
+
+    /// Alle FYLTE ordrer i kronologisk rekkefølge — grunnlag for
+    /// FIFO-beregning av realisert gevinst/tap.
+    pub fn fills_chronological(&self) -> Result<Vec<Fill>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT ts, symbol, side, qty, price FROM orders
+             WHERE status = 'FYLT' ORDER BY ts ASC",
+        )?;
+        let fills = stmt
+            .query_map([], |r| {
+                Ok(Fill {
+                    ts_rfc3339: r.get(0)?,
+                    symbol: r.get(1)?,
+                    is_buy: r.get::<_, String>(2)? == "KJØP",
+                    qty: r.get(3)?,
+                    price: r.get(4)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(fills)
     }
 
     /// Hele transaksjonshistorikken (nyeste først) — også fra tidligere økter.

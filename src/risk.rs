@@ -26,6 +26,20 @@ pub fn protective_exit(avg_price: f64, last: f64, stop_loss_pct: f64, take_profi
     None
 }
 
+/// Trailing stop: selg hvis kursen har falt `trail_pct` fra toppen (peak)
+/// siden kjøpet. 0 = avslått. Beskytter opparbeidet gevinst — en aksje
+/// kjøpt på 100 som steg til 140 selges rundt 128 ved 8 % trailing.
+pub fn trailing_exit(peak: f64, last: f64, trail_pct: f64) -> Option<String> {
+    if trail_pct <= 0.0 || peak <= 0.0 || last <= 0.0 {
+        return None;
+    }
+    let drop_pct = (1.0 - last / peak) * 100.0;
+    if drop_pct >= trail_pct {
+        return Some(format!("Trailing stop (−{drop_pct:.1} % fra topp {peak:.2})"));
+    }
+    None
+}
+
 /// Alle ordrer må gjennom denne før de når megleren. Reglene er bevisst
 /// enkle og harde — de skal stoppe løpske strategier, ikke optimalisere.
 pub struct RiskManager {
@@ -115,6 +129,7 @@ mod tests {
             max_daily_loss: 500.0,
             stop_loss_pct: 8.0,
             take_profit_pct: 0.0,
+            trailing_stop_pct: 0.0,
         }
     }
 
@@ -144,6 +159,16 @@ mod tests {
         // Avslått (0) utløser aldri; ukjent kostpris ignoreres trygt.
         assert!(protective_exit(100.0, 50.0, 0.0, 0.0).is_none());
         assert!(protective_exit(0.0, 50.0, 8.0, 10.0).is_none());
+    }
+
+    #[test]
+    fn trailing_stop_triggers_from_peak() {
+        // Topp 140, 8 % trailing → utløses ved 128.8 eller lavere.
+        assert!(trailing_exit(140.0, 128.0, 8.0).unwrap().contains("Trailing"));
+        assert!(trailing_exit(140.0, 130.0, 8.0).is_none());
+        // Avslått eller ugyldige tall utløser aldri.
+        assert!(trailing_exit(140.0, 100.0, 0.0).is_none());
+        assert!(trailing_exit(0.0, 100.0, 8.0).is_none());
     }
 
     #[test]

@@ -6,7 +6,6 @@ use crate::marketdata;
 use crate::notify::Notifier;
 use crate::state::{Flags, UiState};
 use crate::store;
-use crate::strategy;
 use crate::ui;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -45,7 +44,6 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
     };
 
     let effective_mode = if cfg.is_live() && cfg.broker != "paper" { "live" } else { "paper" };
-    let strategy = strategy::build(&cfg.strategy)?;
     let market = marketdata::Yahoo::new()?;
     let state = Arc::new(Mutex::new(UiState::new(
         effective_mode,
@@ -60,8 +58,9 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
         st.backtest_cfg = cfg.backtest.clone();
         st.watchlist = cfg.watchlist.clone();
         st.start_cash = cfg.starting_cash;
-        // Transaksjonshistorikk fra tidligere økter.
+        // Transaksjonshistorikk og alarmer fra tidligere økter.
         st.transactions = store.recent_orders(500).unwrap_or_default();
+        st.alarms = store.load_alarms().unwrap_or_default();
         // Fortell brukeren om papirporteføljen ble gjenopprettet.
         if !cfg.is_live() || cfg.broker == "paper" {
             if cfg.paper_reset {
@@ -88,12 +87,11 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
         cfg.clone(),
         broker,
         market,
-        strategy,
-        store,
+        store.clone(),
         state.clone(),
         flags.clone(),
         notifier,
-    );
+    )?;
     rt.spawn(engine.run());
 
     if cfg.nordnet.enabled {
@@ -110,7 +108,7 @@ pub fn start(cfg: Config, use_tui: bool) -> Result<()> {
     let result = if use_tui {
         ui::run(state, flags.clone())
     } else {
-        gui::run(state, flags.clone())
+        gui::run(state, flags.clone(), store)
     };
 
     flags.quit.store(true, std::sync::atomic::Ordering::Relaxed);

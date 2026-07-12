@@ -9,6 +9,7 @@ pub mod market;
 pub mod marketdata;
 pub mod nordnet;
 pub mod notify;
+pub mod pnl;
 pub mod risk;
 pub mod state;
 pub mod store;
