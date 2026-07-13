@@ -105,6 +105,11 @@ pub struct UiState {
     pub news_symbol: String,
     pub news: Vec<NewsItem>,
     pub news_pending: bool,
+    /// Daglig egenkapital over tid (unixtid, verdi) — varig historikk.
+    pub equity_daily: Vec<(f64, f64)>,
+    /// Referanseindeksen (unixtid, kurs) til «slår jeg børsen?»-grafen.
+    pub benchmark: Vec<(f64, f64)>,
+    pub benchmark_name: String,
 }
 
 /// En ventende limit-ordre. KJØP utløses når kursen faller til eller under
@@ -213,6 +218,9 @@ impl UiState {
             news_symbol: String::new(),
             news: Vec::new(),
             news_pending: false,
+            equity_daily: Vec::new(),
+            benchmark: Vec::new(),
+            benchmark_name: String::new(),
         }
     }
 

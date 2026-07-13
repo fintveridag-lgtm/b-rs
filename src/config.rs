@@ -49,6 +49,14 @@ pub struct Config {
     pub backtest: BacktestCfg,
     #[serde(default)]
     pub goal: GoalCfg,
+    /// Referanseindeks til «slår jeg børsen?»-grafen (Yahoo-symbol).
+    /// ^OSEAX = Oslo Børs All-share. Tom streng slår av sammenligningen.
+    #[serde(default = "default_benchmark")]
+    pub benchmark: String,
+}
+
+fn default_benchmark() -> String {
+    "^OSEAX".to_string()
 }
 
 /// Sparemål: «jeg vil ha X kr innen år Y» — vises som fremdriftslinje

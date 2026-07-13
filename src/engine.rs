@@ -45,6 +45,8 @@ pub struct Engine {
     fx_failed: HashSet<String>,
     /// Antall tikk på rad uten en eneste kurs — vakthund for datastrømmen.
     fail_streak: u32,
+    /// Sist daglig egenkapital-øyeblikksbilde ble skrevet (maks hvert 5. min).
+    last_equity_write: Option<std::time::Instant>,
 }
 
 impl Engine {
@@ -84,6 +86,7 @@ impl Engine {
             fx: HashMap::new(),
             fx_failed: HashSet::new(),
             fail_streak: 0,
+            last_equity_write: None,
         })
     }
 
@@ -553,6 +556,42 @@ impl Engine {
             st.drawdown = drawdown;
             st.push_equity(now.timestamp() as f64, equity);
             st.last_tick = Some(now);
+        }
+        self.record_equity_snapshot(equity);
+    }
+
+    /// Daglig egenkapital-øyeblikksbilde: én rad per dag i databasen
+    /// (siste verdi vinner), maks én skriving hvert 5. minutt.
+    /// Grunnlaget for den langsiktige utviklingsgrafen i Portefølje.
+    fn record_equity_snapshot(&mut self, equity: f64) {
+        if equity <= 0.0 {
+            return;
+        }
+        let due = self
+            .last_equity_write
+            .is_none_or(|t| t.elapsed() > Duration::from_secs(300));
+        if !due {
+            return;
+        }
+        self.last_equity_write = Some(std::time::Instant::now());
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let _ = self.store.save_equity_snapshot(&today, equity);
+
+        // Speil i UI-tilstanden: erstatt dagens punkt eller legg til nytt.
+        let ts = chrono::Utc::now().timestamp() as f64;
+        let mut st = self.state.lock().unwrap();
+        let last_is_today = st.equity_daily.last().is_some_and(|&(t, _)| {
+            chrono::DateTime::from_timestamp(t as i64, 0)
+                .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+                .as_deref()
+                == Some(today.as_str())
+        });
+        if last_is_today {
+            if let Some(last) = st.equity_daily.last_mut() {
+                *last = (ts, equity);
+            }
+        } else {
+            st.equity_daily.push((ts, equity));
         }
     }
 

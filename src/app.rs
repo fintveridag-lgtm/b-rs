@@ -75,6 +75,7 @@ pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path
         st.symbol_strategy = store.load_symbol_strategies().unwrap_or_default();
         st.limit_orders = store.load_limit_orders().unwrap_or_default();
         st.savings_plans = store.load_savings_plans().unwrap_or_default();
+        st.equity_daily = store.load_equity_history().unwrap_or_default();
         let (n_limits, n_plans) = (st.limit_orders.len(), st.savings_plans.len());
         if n_limits > 0 {
             st.log(format!("{n_limits} ventende limit-ordrer lastet fra forrige økt."));
@@ -123,6 +124,33 @@ pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path
 
     if cfg.nordnet.enabled {
         rt.spawn(engine::nordnet_task(cfg.clone(), state.clone(), flags.clone()));
+    }
+
+    // Referanseindeksen til «slår jeg børsen?»-grafen (stille ved feil).
+    if !cfg.benchmark.is_empty() {
+        let market_bm = market.clone();
+        let state_bm = state.clone();
+        let symbol = cfg.benchmark.clone();
+        rt.spawn(async move {
+            match market_bm.history_daily(&symbol, "2y").await {
+                Ok(bars) if !bars.is_empty() => {
+                    let pts: Vec<(f64, f64)> = bars.iter().map(|b| (b.ts, b.close)).collect();
+                    let mut st = state_bm.lock().unwrap();
+                    st.benchmark = pts;
+                    st.benchmark_name = if symbol == "^OSEAX" {
+                        "Oslo Børs".to_string()
+                    } else {
+                        symbol.clone()
+                    };
+                }
+                _ => {
+                    state_bm
+                        .lock()
+                        .unwrap()
+                        .log(format!("Fikk ikke hentet referanseindeksen {symbol}."));
+                }
+            }
+        });
     }
 
     // Markedsoversikten (mest omsatte, daytrading, fond, ukesanalyse).

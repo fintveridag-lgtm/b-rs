@@ -158,6 +158,63 @@ pub fn symbol_context(st: &UiState, symbol: &str) -> String {
     .to_string()
 }
 
+/// Systemprompt for vurdering av HELE porteføljen brukeren sitter med.
+const PORTFOLIO_PROMPT: &str = r#"Du er «Morgan», en tenkt senior aksjeanalytiker med 20 års erfaring, innebygd analysesjef i brukerens private handelsapp (b-rs). Brukeren ber deg vurdere porteføljen sin som helhet.
+
+Lever en porteføljevurdering på norsk i Markdown med:
+1. Helhetsinntrykk i to-tre setninger: hva slags portefølje er dette?
+2. Konsentrasjon og spredning: for mye i én aksje, én sektor eller ett land? Overlapper noen av posisjonene hverandre (samme eksponering to ganger)?
+3. Risikoprofil: hvor mye kan dette svinge? Passer kontantandelen?
+4. Posisjon for posisjon: kort vurdering (behold / vurder å øke / vurder å redusere) med én setnings begrunnelse
+5. Hva mangler: hull i porteføljen og 2–3 konkrete kandidater som ville komplettert den
+6. Tre konkrete, prioriterte grep brukeren kan vurdere nå
+Avslutt med en oppsummeringstabell over posisjonene med vurdering per rad.
+
+Regler: sanntidsdataene er fasit for dagens verdier. Fundamentalkunnskap er per din kunnskaps-cutoff — si det. Vær ærlig og konkret, ikke diplomatisk vag. Start og avslutt med én linje om at dette er AI-generert research — ikke investeringsrådgivning."#;
+
+/// JSON-kontekst for porteføljevurderingen: alle posisjoner, kontanter,
+/// utbytte og watchlisten (det brukeren vurderer, men ikke eier).
+pub fn portfolio_context(st: &UiState) -> String {
+    let posisjoner: Vec<Value> = st
+        .positions
+        .iter()
+        .map(|p| {
+            let (valuta, dag_pct) = st
+                .quotes
+                .get(&p.symbol)
+                .map(|q| (q.currency.clone(), q.change_pct()))
+                .unwrap_or_default();
+            json!({
+                "symbol": p.symbol,
+                "antall": p.qty,
+                "snittkurs": p.avg_price,
+                "siste_kurs": p.last,
+                "verdi": p.market_value(),
+                "urealisert_gevinst": p.unrealized(),
+                "valuta": valuta,
+                "endring_i_dag_pct": dag_pct,
+                "utbytte_12mnd_per_aksje": st.dividends.get(&p.symbol),
+            })
+        })
+        .collect();
+
+    json!({
+        "dato": chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        "merknad": "Verdier i posisjonens egen valuta. Kurser ca. 15 min forsinket.",
+        "kontanter": st.cash,
+        "egenkapital": st.equity,
+        "posisjoner": posisjoner,
+        "watchlist_ikke_eid": st.watchlist.iter().filter(|s| !st.positions.iter().any(|p| &p.symbol == *s)).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+/// Vurder hele porteføljen — konsentrasjon, risiko, hull og konkrete grep.
+pub async fn analyze_portfolio(api_key: &str, context_json: &str) -> Result<String> {
+    let user = format!("Vurder porteføljen min.\n\nPorteføljedata fra appen min (JSON):\n{context_json}");
+    call_claude(api_key, PORTFOLIO_PROMPT, &user, 12000).await
+}
+
 /// Kjør full screening: ett kall til Anthropic Messages API (Claude Opus 4.8).
 pub async fn analyze(api_key: &str, profile: &str, market_json: &str) -> Result<String> {
     let user = format!(

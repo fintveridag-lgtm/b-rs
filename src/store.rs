@@ -65,6 +65,10 @@ impl Store {
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS equity_daily (
+                date TEXT PRIMARY KEY,
+                equity REAL NOT NULL
             );",
         )?;
         Ok(Self { conn: Mutex::new(conn) })
@@ -241,6 +245,34 @@ impl Store {
             .filter_map(|r| r.ok())
             .collect();
         Ok(plans)
+    }
+
+    /// Dagens egenkapital-øyeblikksbilde — én rad per dag, siste verdi vinner.
+    /// Grunnlaget for den langsiktige utviklingsgrafen.
+    pub fn save_equity_snapshot(&self, date: &str, equity: f64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO equity_daily (date, equity) VALUES (?1, ?2)
+             ON CONFLICT(date) DO UPDATE SET equity = excluded.equity",
+            params![date, equity],
+        )?;
+        Ok(())
+    }
+
+    /// Hele egenkapital-historikken som (unixtid midt på dagen, verdi), eldst først.
+    pub fn load_equity_history(&self) -> Result<Vec<(f64, f64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT date, equity FROM equity_daily ORDER BY date ASC")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))?
+            .filter_map(|r| r.ok())
+            .filter_map(|(date, equity)| {
+                let d = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()?;
+                let ts = d.and_hms_opt(12, 0, 0)?.and_utc().timestamp() as f64;
+                Some((ts, equity))
+            })
+            .collect();
+        Ok(rows)
     }
 
     /// Små nøkkel/verdi-fakta som må overleve omstart (ukesrapport-status o.l.).
@@ -435,6 +467,20 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].day, 5);
         assert_eq!(loaded[0].last_run, "2026-06");
+    }
+
+    #[test]
+    fn equity_history_roundtrip() {
+        let store = Store::open(":memory:").unwrap();
+        assert!(store.load_equity_history().unwrap().is_empty());
+        store.save_equity_snapshot("2026-07-10", 101_000.0).unwrap();
+        store.save_equity_snapshot("2026-07-11", 102_500.0).unwrap();
+        // Samme dag overskrives — siste verdi vinner.
+        store.save_equity_snapshot("2026-07-11", 103_000.0).unwrap();
+        let hist = store.load_equity_history().unwrap();
+        assert_eq!(hist.len(), 2);
+        assert!(hist[0].0 < hist[1].0, "eldst først");
+        assert_eq!(hist[1].1, 103_000.0);
     }
 
     #[test]

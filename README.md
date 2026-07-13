@@ -54,7 +54,12 @@ Automatikk i motoren: **limit-ordrer** («kjøp hvis kursen faller til X»),
 **spareavtaler** (fast kronebeløp samme dag hver måned), **ukesrapport** til
 mobilen fredag ettermiddag, og **sparemål** med fremdriftslinje i porteføljen.
 Nyheter per aksje vises under grafen (Yahoo Finance).
-| `strategy` | `Strategy`-traiten + `sma_cross`, `rsi` og `momentum` — byttes i appen |
+
+Langsiktig innsikt: appen lagrer et **daglig egenkapital-øyeblikksbilde** og
+tegner utviklingen over tid mot en **referanseindeks** (`benchmark` i konfig,
+standard `^OSEAX` = Oslo Børs) — så du ser ærlig om du slår børsen. Porteføljen
+viser også **forventet årlig utbytte** fra beholdningen.
+| `strategy` | `Strategy`-traiten + `sma_cross`, `rsi`, `momentum`, `macd` og `bollinger` — byttes i appen |
 | `backtest` | Kjør en strategi over historikken og sammenlign med kjøp-og-hold |
 | `risk` | Harde grenser: maks ordreverdi, maks posisjon, ratebegrensning, tapsgrense — pluss stop-loss/take-profit/trailing stop per posisjon |
 | `pnl` | Realisert gevinst/tap (FIFO) og skatterapport-eksport (CSV) |

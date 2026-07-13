@@ -122,6 +122,8 @@ pub fn run(deps: GuiDeps) -> Result<()> {
         viewport,
         ..Default::default()
     };
+    // Velkomstguiden vises bare aller første gang appen åpnes.
+    let store_welcome_pending = store.meta_get("welcome_shown").is_none();
     let app = App {
         state,
         flags: flags.clone(),
@@ -161,6 +163,8 @@ pub fn run(deps: GuiDeps) -> Result<()> {
              Foretrukne sektorer: energi, sjømat, teknologi\n\
              Annet: utbytte er et pluss, helst Oslo Børs",
         ),
+        morgan_symbol: String::new(),
+        welcome_open: store_welcome_pending,
     };
     let result = eframe::run_native(
         "b-rs",
@@ -296,6 +300,10 @@ struct App {
     realized_cache: (usize, Vec<RealizedTrade>),
     /// Investeringsprofilen brukeren sender til Morgan.
     morgan_profile: String,
+    /// Symbolvalget i Morgans dypdykk-nedtrekk.
+    morgan_symbol: String,
+    /// Velkomstguiden ved aller første oppstart.
+    welcome_open: bool,
 }
 
 impl App {
@@ -444,6 +452,7 @@ impl eframe::App for App {
         }
 
         self.confirm_order_dialog(ctx, &mut st);
+        self.welcome_dialog(ctx);
         self.draw_toasts(ctx, &mut st);
         self.handle_close_request(ctx);
     }
@@ -1402,6 +1411,41 @@ impl App {
         }
     }
 
+    /// Velkomstguiden — vises én gang, aller første oppstart.
+    fn welcome_dialog(&mut self, ctx: &egui::Context) {
+        if !self.welcome_open {
+            return;
+        }
+        egui::Window::new("👋 Velkommen til b-rs!")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, -30.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(430.0);
+                ui.add_space(4.0);
+                ui.label(RichText::new("Tre ting før du begynner:").strong());
+                ui.add_space(6.0);
+                ui.label("1️⃣  Appen starter i PAPIR-modus: lekepenger og ekte kurser — helt risikofritt. Live-handel må skrus på bevisst i konfigurasjonen.");
+                ui.add_space(4.0);
+                ui.label("2️⃣  Søk opp aksjer i venstrepanelet og følg dem — grafen, boten og analysene jobber med watchlisten din.");
+                ui.add_space(4.0);
+                ui.label("3️⃣  Test alltid en strategi med 🧪 Backtest før du lar den handle, og bruk 🧠 Morgan-fanen når du vil ha analysehjelp.");
+                ui.add_space(8.0);
+                ui.small("Alt forklares i ❓ Hjelp-fanen. Ingenting handles uten at du bekrefter eller har slått det på selv.");
+                ui.add_space(8.0);
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new("Skjønner — la oss begynne! 🚀").color(Color32::BLACK).strong())
+                            .fill(GREEN),
+                    )
+                    .clicked()
+                {
+                    self.welcome_open = false;
+                    let _ = self.store.meta_set("welcome_shown", "1");
+                }
+            });
+    }
+
     fn bottom_panel(&self, ctx: &egui::Context, st: &UiState) {
         egui::TopBottomPanel::bottom("bunn")
             .default_height(210.0)
@@ -1451,41 +1495,31 @@ impl App {
 
     /// Send Morgan på dypdykk i én bestemt aksje (rapporten vises i 🧠-fanen).
     fn ask_morgan_about(&self, symbol: &str, st: &mut UiState) {
-        match std::env::var("ANTHROPIC_API_KEY") {
-            Err(_) => {
-                st.morgan_error = Some(
-                    "Mangler API-nøkkel. Opprett en på console.anthropic.com og sett \
-                     miljøvariabelen ANTHROPIC_API_KEY før du starter appen \
-                     (Windows: setx ANTHROPIC_API_KEY \"sk-ant-…\", start appen på nytt)."
-                        .into(),
-                );
-            }
-            Ok(key) => {
-                st.morgan_pending = true;
-                st.morgan_error = None;
-                st.log(format!("🧠 Morgan dykker ned i {symbol} …"));
-                let ctx_json = crate::morgan::symbol_context(st, symbol);
-                let state = self.state.clone();
-                let symbol = symbol.to_string();
-                self.rt.spawn(async move {
-                    let result = crate::morgan::analyze_symbol(&key, &symbol, &ctx_json).await;
-                    let mut st = state.lock().unwrap();
-                    st.morgan_pending = false;
-                    match result {
-                        Ok(report) => {
-                            st.morgan_report = Some(report);
-                            st.toast(format!("🧠 Morgan er ferdig med {symbol}."));
-                            st.log("🧠 Morgan leverte dypdykket.");
-                        }
-                        Err(e) => {
-                            let msg = format!("{e:#}");
-                            st.log(format!("🧠 Morgan feilet: {msg}"));
-                            st.morgan_error = Some(msg);
-                        }
-                    }
-                });
-            }
-        }
+        let Some(key) = morgan_key(st) else { return };
+        st.morgan_pending = true;
+        st.morgan_error = None;
+        st.log(format!("🧠 Morgan dykker ned i {symbol} …"));
+        let ctx_json = crate::morgan::symbol_context(st, symbol);
+        let state = self.state.clone();
+        let symbol = symbol.to_string();
+        self.rt.spawn(async move {
+            let result = crate::morgan::analyze_symbol(&key, &symbol, &ctx_json).await;
+            deliver_morgan_result(&state, result, "dypdykket");
+        });
+    }
+
+    /// Be Morgan vurdere hele porteføljen (rapporten vises i 🧠-fanen).
+    fn ask_morgan_portfolio(&self, st: &mut UiState) {
+        let Some(key) = morgan_key(st) else { return };
+        st.morgan_pending = true;
+        st.morgan_error = None;
+        st.log("🧠 Morgan vurderer porteføljen …");
+        let ctx_json = crate::morgan::portfolio_context(st);
+        let state = self.state.clone();
+        self.rt.spawn(async move {
+            let result = crate::morgan::analyze_portfolio(&key, &ctx_json).await;
+            deliver_morgan_result(&state, result, "porteføljevurderingen");
+        });
     }
 
     fn chart_panel(&mut self, ctx: &egui::Context, st: &mut UiState) {
@@ -1504,14 +1538,6 @@ impl App {
                     let pct = q.change_pct();
                     let color = if pct >= 0.0 { GREEN } else { RED };
                     ui.label(RichText::new(format!("{:.2}  ({pct:+.2} %)", q.last)).color(color).strong().size(18.0));
-                }
-                if ui
-                    .add_enabled(!st.morgan_pending, egui::Button::new("🧠 Spør Morgan"))
-                    .on_hover_text("Dypdykk i denne aksjen fra AI-analysesjefen (krever ANTHROPIC_API_KEY)")
-                    .clicked()
-                {
-                    self.ask_morgan_about(&symbol, st);
-                    self.view = View::Morgan;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.selectable_value(&mut self.range, ChartRange::All, "Alt");
@@ -1892,6 +1918,105 @@ impl App {
                         ]);
                     }
                 });
+
+                // Forventet utbytte fra beholdningen (siste 12 mnd per aksje).
+                let annual_div: f64 = st
+                    .positions
+                    .iter()
+                    .filter_map(|p| {
+                        st.dividends.get(&p.symbol).map(|d| {
+                            let cur = st
+                                .quotes
+                                .get(&p.symbol)
+                                .map(|q| q.currency.clone())
+                                .unwrap_or_default();
+                            to_nok(st, &cur, d * p.qty)
+                        })
+                    })
+                    .sum();
+                if annual_div > 0.0 {
+                    ui.add_space(14.0);
+                    section_heading(ui, "💰 Utbytte");
+                    let value_nok: f64 = st
+                        .positions
+                        .iter()
+                        .map(|p| {
+                            let cur = st
+                                .quotes
+                                .get(&p.symbol)
+                                .map(|q| q.currency.clone())
+                                .unwrap_or_default();
+                            to_nok(st, &cur, p.market_value())
+                        })
+                        .sum();
+                    let yield_pct = if value_nok > 0.0 { annual_div / value_nok * 100.0 } else { 0.0 };
+                    ui.horizontal(|ui| {
+                        stat_card(ui, "Forventet årlig utbytte", format!("{} kr", fmt_thousands(annual_div)), GREEN);
+                        stat_card(ui, "Utbytteyield", format!("{yield_pct:.1} %"), GREEN);
+                    });
+                    ui.small("Basert på utbetalt utbytte siste 12 måneder per aksje du eier — ingen garanti for neste år.");
+                }
+
+                // Langsiktig utvikling: ett punkt per dag, mot referanseindeksen.
+                ui.add_space(14.0);
+                section_heading(ui, "📈 Utvikling over tid");
+                if st.equity_daily.len() > 1 {
+                    let pts: Vec<[f64; 2]> = st.equity_daily.iter().map(|&(t, v)| [t, v]).collect();
+                    let (start_ts, start_eq) = (pts[0][0], pts[0][1]);
+                    // Indeksen skaleres til samme startverdi som porteføljen —
+                    // da er linjene direkte sammenlignbare.
+                    let bench: Vec<[f64; 2]> = {
+                        let b0 = st
+                            .benchmark
+                            .iter()
+                            .find(|(t, _)| *t >= start_ts)
+                            .map(|&(_, v)| v)
+                            .filter(|v| *v > 0.0);
+                        match b0 {
+                            Some(b0) => st
+                                .benchmark
+                                .iter()
+                                .filter(|(t, _)| *t >= start_ts)
+                                .map(|&(t, v)| [t, start_eq * v / b0])
+                                .collect(),
+                            None => Vec::new(),
+                        }
+                    };
+                    let farge = if pts.last().is_some_and(|p| p[1] >= start_eq) { GREEN } else { RED };
+                    let bench_navn = if st.benchmark_name.is_empty() {
+                        "Indeks".to_string()
+                    } else {
+                        st.benchmark_name.clone()
+                    };
+                    Plot::new("portefolje_lang")
+                        .height(220.0)
+                        .legend(Legend::default())
+                        .x_axis_formatter(|mark, _range| {
+                            chrono::DateTime::from_timestamp(mark.value as i64, 0)
+                                .map(|dt| dt.format("%d.%m.%y").to_string())
+                                .unwrap_or_default()
+                        })
+                        .show(ui, |plot_ui| {
+                            plot_ui.line(
+                                Line::new(PlotPoints::from(pts)).color(farge).width(2.2).name("Porteføljen"),
+                            );
+                            if bench.len() > 1 {
+                                plot_ui.line(
+                                    Line::new(PlotPoints::from(bench))
+                                        .color(GRAY)
+                                        .width(1.4)
+                                        .style(LineStyle::dashed_dense())
+                                        .name(format!("{bench_navn} (indeksert)")),
+                                );
+                            }
+                        });
+                    ui.small(
+                        "Referanseindeksen er skalert til samme startverdi — ligger porteføljelinjen over, slår du børsen. \
+                         Ett punkt lagres per dag appen er åpen.",
+                    );
+                } else {
+                    ui.small("Bygges opp etter hvert som appen lagrer ett egenkapital-punkt per dag — kom tilbake i morgen.");
+                }
 
                 // Utviklingsgraf
                 ui.add_space(14.0);
@@ -2468,72 +2593,102 @@ impl App {
                     }
                 });
                 ui.small(
-                    "Morgan er en tenkt senior aksjeanalytiker (drevet av Claude, Anthropic). Han får \
-                     investeringsprofilen din pluss appens sanntidsdata, og leverer en komplett \
-                     screeningrapport: topp 10 aksjer, P/E, gjeld, utbytte, vollgrav, bull/bear-kursmål, \
-                     risiko 1–10, inngangssoner og stop-loss. AI-generert research — IKKE investeringsråd.",
+                    "Morgan er en tenkt senior aksjeanalytiker (drevet av Claude, Anthropic). Han bruker \
+                     appens sanntidsdata og kan tre ting: screene markedet etter profilen din, dykke ned \
+                     i én aksje, og vurdere porteføljen din som helhet. AI-generert research — IKKE investeringsråd.",
                 );
                 ui.add_space(8.0);
 
-                section_heading(ui, "Din investeringsprofil");
-                ui.small("Beskriv risikotoleranse, investeringsbeløp, tidshorisont og foretrukne sektorer.");
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.morgan_profile)
-                        .desired_rows(5)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.add_space(6.0);
-
-                ui.horizontal(|ui| {
-                    let ready = !st.morgan_pending && !self.morgan_profile.trim().is_empty();
-                    let btn = egui::Button::new(
-                        RichText::new("🧠 Kjør analyse").color(Color32::BLACK).strong(),
-                    )
-                    .fill(GREEN);
-                    if ui.add_enabled(ready, btn).clicked() {
-                        match std::env::var("ANTHROPIC_API_KEY") {
-                            Err(_) => {
-                                st.morgan_error = Some(
-                                    "Mangler API-nøkkel. Opprett en på console.anthropic.com og sett \
-                                     miljøvariabelen ANTHROPIC_API_KEY før du starter appen \
-                                     (Windows: setx ANTHROPIC_API_KEY \"sk-ant-…\", start appen på nytt)."
-                                        .into(),
-                                );
-                            }
-                            Ok(key) => {
-                                st.morgan_pending = true;
-                                st.morgan_error = None;
-                                st.log(format!("🧠 Morgan analyserer ({}) …", crate::morgan::MODEL));
-                                let profile = self.morgan_profile.trim().to_string();
-                                let market_json = crate::morgan::market_context(st);
-                                let state = self.state.clone();
-                                self.rt.spawn(async move {
-                                    let result =
-                                        crate::morgan::analyze(&key, &profile, &market_json).await;
-                                    let mut st = state.lock().unwrap();
-                                    st.morgan_pending = false;
-                                    match result {
-                                        Ok(report) => {
-                                            st.morgan_report = Some(report);
-                                            st.toast("🧠 Morgan er ferdig med analysen.");
-                                            st.log("🧠 Morgan leverte rapporten.");
-                                        }
-                                        Err(e) => {
-                                            let msg = format!("{e:#}");
-                                            st.log(format!("🧠 Morgan feilet: {msg}"));
-                                            st.morgan_error = Some(msg);
-                                        }
-                                    }
-                                });
-                            }
+                let ledig = !st.morgan_pending;
+                ui.columns(3, |cols| {
+                    // 1) Full screening etter investeringsprofilen.
+                    let ui = &mut cols[0];
+                    section_heading(ui, "📋 Screening");
+                    ui.small("Topp 10 aksjer etter profilen din: P/E, gjeld, utbytte, vollgrav, kursmål, risiko og inngangssoner.");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.morgan_profile)
+                            .desired_rows(5)
+                            .desired_width(f32::INFINITY),
+                    );
+                    let ready = ledig && !self.morgan_profile.trim().is_empty();
+                    if ui
+                        .add_enabled(
+                            ready,
+                            egui::Button::new(RichText::new("🧠 Kjør screening").color(Color32::BLACK).strong())
+                                .fill(GREEN),
+                        )
+                        .clicked()
+                    {
+                        if let Some(key) = morgan_key(st) {
+                            st.morgan_pending = true;
+                            st.morgan_error = None;
+                            st.log(format!("🧠 Morgan screener markedet ({}) …", crate::morgan::MODEL));
+                            let profile = self.morgan_profile.trim().to_string();
+                            let market_json = crate::morgan::market_context(st);
+                            let state = self.state.clone();
+                            self.rt.spawn(async move {
+                                let result = crate::morgan::analyze(&key, &profile, &market_json).await;
+                                deliver_morgan_result(&state, result, "screeningen");
+                            });
                         }
                     }
-                    ui.label(
-                        RichText::new(format!("modell: {} · krever ANTHROPIC_API_KEY", crate::morgan::MODEL))
-                            .color(GRAY)
-                            .small(),
-                    );
+
+                    // 2) Dypdykk i én aksje.
+                    let ui = &mut cols[1];
+                    section_heading(ui, "🔍 Dypdykk i én aksje");
+                    ui.small("For og imot, nøkkeltall, teknisk bilde, kursmål og nivåer — og en vurdering av posisjonen din hvis du eier den.");
+                    if self.morgan_symbol.is_empty() {
+                        self.morgan_symbol = self
+                            .selected
+                            .clone()
+                            .or_else(|| st.quotes.keys().next().cloned())
+                            .unwrap_or_default();
+                    }
+                    egui::ComboBox::from_id_salt("morgan_symbol")
+                        .selected_text(&self.morgan_symbol)
+                        .show_ui(ui, |ui| {
+                            for s in st.quotes.keys() {
+                                ui.selectable_value(&mut self.morgan_symbol, s.clone(), s);
+                            }
+                        });
+                    let ready = ledig && !self.morgan_symbol.is_empty();
+                    if ui
+                        .add_enabled(
+                            ready,
+                            egui::Button::new(RichText::new("🧠 Kjør dypdykk").color(Color32::BLACK).strong())
+                                .fill(GREEN),
+                        )
+                        .clicked()
+                    {
+                        let symbol = self.morgan_symbol.clone();
+                        self.ask_morgan_about(&symbol, st);
+                    }
+
+                    // 3) Porteføljevurdering.
+                    let ui = &mut cols[2];
+                    section_heading(ui, "💼 Porteføljevurdering");
+                    ui.small("Konsentrasjon, overlapp, risiko, vurdering per posisjon, hull i porteføljen og tre konkrete grep.");
+                    let ready = ledig && !st.positions.is_empty();
+                    if ui
+                        .add_enabled(
+                            ready,
+                            egui::Button::new(RichText::new("🧠 Vurder porteføljen").color(Color32::BLACK).strong())
+                                .fill(GREEN),
+                        )
+                        .clicked()
+                    {
+                        self.ask_morgan_portfolio(st);
+                    }
+                    if st.positions.is_empty() {
+                        ui.small("Krever minst én posisjon.");
+                    }
                 });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!("modell: {} · krever ANTHROPIC_API_KEY · hver analyse er ett betalt API-kall", crate::morgan::MODEL))
+                        .color(GRAY)
+                        .small(),
+                );
 
                 if let Some(err) = &st.morgan_error {
                     ui.add_space(6.0);
@@ -2702,7 +2857,9 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
         "🧠 Strategiene",
         "sma_cross: kjøper når snittkursen siste 5 dager krysser over snittet siste 20 (og selger ved kryss under) — følger trender.\n\
          rsi: kjøper når aksjen er «oversolgt» (RSI under 30) og selger når den er «overkjøpt» (over 70) — satser på rekyl.\n\
-         momentum: kjøper når kursen bryter over det høyeste på 20 dager, selger ved brudd under det laveste — følger utbrudd.\n\n\
+         momentum: kjøper når kursen bryter over det høyeste på 20 dager, selger ved brudd under det laveste — følger utbrudd.\n\
+         macd: kjøper når MACD-linjen (12/26) krysser over signallinjen (9), selger ved kryss under — fanger trendskifter.\n\
+         bollinger: kjøper når kursen faller under nedre bånd (snitt −2 standardavvik = uvanlig billig mot seg selv), selger over øvre bånd.\n\n\
          Bytt strategi i Strategi-panelet, overstyr per aksje, og test alltid med 🧪 Backtest eller ⚖ Sammenlign først.",
     ),
     (
@@ -2758,12 +2915,11 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
     ),
     (
         "🧠 Morgan — AI-analysesjefen",
-        "Morgan er en tenkt senior aksjeanalytiker drevet av Claude (Anthropic). Beskriv \
-         investeringsprofilen din i 🧠-fanen, så leverer han en komplett screeningrapport: topp 10 \
-         aksjer, P/E mot sektoren, omsetningsvekst, gjeldsgrad, utbytte, vollgrav, bull/bear-kursmål, \
-         risiko 1–10, inngangssoner og stop-loss — basert på appens sanntidskurser. \
-         «🧠 Spør Morgan»-knappen ved grafen gir et raskere dypdykk i én enkelt aksje: for/imot, \
-         nivåer og hva du bør følge med på.\n\
+        "Morgan er en tenkt senior aksjeanalytiker drevet av Claude (Anthropic). Alt han kan, ligger \
+         i 🧠-fanen: SCREENING (topp 10 aksjer etter profilen din, med P/E, gjeld, utbytte, vollgrav, \
+         kursmål, risiko og inngangssoner), DYPDYKK i én aksje (for/imot, nøkkeltall, nivåer og \
+         vurdering av posisjonen din), og PORTEFØLJEVURDERING (konsentrasjon, overlapp, hull og tre \
+         konkrete grep). Alt basert på appens sanntidsdata.\n\
          Krever en API-nøkkel fra console.anthropic.com i miljøvariabelen ANTHROPIC_API_KEY \
          (Windows: setx ANTHROPIC_API_KEY \"sk-ant-…\", start appen på nytt). Hver analyse er ett \
          betalt API-kall (noen kroner). Fundamentaltallene er fra modellens kunnskap — verifiser før handel.",
@@ -2928,6 +3084,40 @@ fn sma_series(history: &VecDeque<(f64, f64)>, window: usize) -> Vec<[f64; 2]> {
         out.push([vals[i].0, sum / window as f64]);
     }
     out
+}
+
+/// Hent API-nøkkelen til Morgan, eller forklar hva som mangler.
+fn morgan_key(st: &mut UiState) -> Option<String> {
+    match std::env::var("ANTHROPIC_API_KEY") {
+        Ok(key) => Some(key),
+        Err(_) => {
+            st.morgan_error = Some(
+                "Mangler API-nøkkel. Opprett en på console.anthropic.com og sett \
+                 miljøvariabelen ANTHROPIC_API_KEY før du starter appen \
+                 (Windows: setx ANTHROPIC_API_KEY \"sk-ant-…\", start appen på nytt)."
+                    .into(),
+            );
+            None
+        }
+    }
+}
+
+/// Felles landing for alle Morgan-svar: rapport eller feilmelding inn i tilstanden.
+fn deliver_morgan_result(state: &SharedState, result: Result<String>, hva: &str) {
+    let mut st = state.lock().unwrap();
+    st.morgan_pending = false;
+    match result {
+        Ok(report) => {
+            st.morgan_report = Some(report);
+            st.toast(format!("🧠 Morgan er ferdig med {hva}."));
+            st.log(format!("🧠 Morgan leverte {hva}."));
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            st.log(format!("🧠 Morgan feilet: {msg}"));
+            st.morgan_error = Some(msg);
+        }
+    }
 }
 
 /// «for 2 t siden» / «for 3 d siden» — alder på en nyhetssak.
