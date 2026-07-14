@@ -1,15 +1,57 @@
 //! «Morgan» — appens innebygde analysesjef: en tenkt senior aksjeanalytiker
-//! drevet av Claude (Anthropic API). Får brukerens investeringsprofil pluss
-//! appens sanntidsdata, og leverer en komplett screeningrapport i Markdown.
+//! drevet av en språkmodell. Får brukerens investeringsprofil pluss appens
+//! sanntidsdata, og leverer analyserapporter i Markdown.
 //!
-//! Krever en API-nøkkel i miljøvariabelen ANTHROPIC_API_KEY
-//! (opprettes på console.anthropic.com). Hver analyse er ett API-kall.
+//! To hjerner ([morgan] provider i konfig):
+//! - "claude": Anthropic API, best kvalitet. Krever API-nøkkel i
+//!   miljøvariabelen ANTHROPIC_API_KEY (console.anthropic.com); betalt per kall.
+//! - "ollama": lokal modell på brukerens PC (ollama.com) — gratis, privat og
+//!   offline, men enklere analyser. Ingen nøkkel, ingen sky.
 
 use crate::state::UiState;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 pub const MODEL: &str = "claude-opus-4-8";
+
+/// Hjernen bak Morgan — velges i konfigurasjonen ([morgan] provider).
+pub enum Backend {
+    /// Anthropic API (best kvalitet; krever ANTHROPIC_API_KEY).
+    Claude { api_key: String },
+    /// Lokal modell via Ollama på din egen PC — gratis, privat, offline.
+    Ollama { url: String, model: String },
+}
+
+impl Backend {
+    /// Menneskevennlig beskrivelse til GUI og logg.
+    pub fn label(&self) -> String {
+        match self {
+            Backend::Claude { .. } => format!("{MODEL} (Anthropic)"),
+            Backend::Ollama { model, .. } => format!("{model} (lokalt via Ollama)"),
+        }
+    }
+}
+
+/// Bygg riktig bakende fra konfigurasjonen. Claude krever API-nøkkel i
+/// miljøet; Ollama krever bare at programmet kjører lokalt.
+pub fn backend(cfg: &crate::config::MorganCfg) -> Result<Backend> {
+    match cfg.provider.as_str() {
+        "ollama" => Ok(Backend::Ollama {
+            url: cfg.ollama_url.clone(),
+            model: cfg.ollama_model.clone(),
+        }),
+        _ => match std::env::var("ANTHROPIC_API_KEY") {
+            Ok(api_key) => Ok(Backend::Claude { api_key }),
+            Err(_) => anyhow::bail!(
+                "Mangler API-nøkkel. Opprett en på console.anthropic.com og sett \
+                 miljøvariabelen ANTHROPIC_API_KEY før du starter appen \
+                 (Windows: setx ANTHROPIC_API_KEY \"sk-ant-…\", start appen på nytt). \
+                 Alternativ uten Claude: sett provider = \"ollama\" under [morgan] i \
+                 Innstillinger og kjør en lokal modell via ollama.com."
+            ),
+        },
+    }
+}
 
 const SYSTEM_PROMPT: &str = r#"Du er «Morgan», en tenkt senior aksjeanalytiker med 20 års erfaring fra en ledende internasjonal investeringsbank, spesialisert på aksjescreening for formuende kunder. Du er innebygd analysesjef i brukerens private handelsapp (b-rs).
 
@@ -210,25 +252,74 @@ pub fn portfolio_context(st: &UiState) -> String {
 }
 
 /// Vurder hele porteføljen — konsentrasjon, risiko, hull og konkrete grep.
-pub async fn analyze_portfolio(api_key: &str, context_json: &str) -> Result<String> {
+pub async fn analyze_portfolio(backend: &Backend, context_json: &str) -> Result<String> {
     let user = format!("Vurder porteføljen min.\n\nPorteføljedata fra appen min (JSON):\n{context_json}");
-    call_claude(api_key, PORTFOLIO_PROMPT, &user, 12000).await
+    call_llm(backend, PORTFOLIO_PROMPT, &user, 12000).await
 }
 
-/// Kjør full screening: ett kall til Anthropic Messages API (Claude Opus 4.8).
-pub async fn analyze(api_key: &str, profile: &str, market_json: &str) -> Result<String> {
+/// Kjør full screening — ett kall til valgt bakende.
+pub async fn analyze(backend: &Backend, profile: &str, market_json: &str) -> Result<String> {
     let user = format!(
         "Min investeringsprofil:\n{profile}\n\nSanntidsdata fra appen min (JSON):\n{market_json}"
     );
-    call_claude(api_key, SYSTEM_PROMPT, &user, 16000).await
+    call_llm(backend, SYSTEM_PROMPT, &user, 16000).await
 }
 
-/// Dypdykk i én aksje — kortere rapport, samme modell.
-pub async fn analyze_symbol(api_key: &str, symbol: &str, context_json: &str) -> Result<String> {
+/// Dypdykk i én aksje — kortere rapport, samme bakende.
+pub async fn analyze_symbol(backend: &Backend, symbol: &str, context_json: &str) -> Result<String> {
     let user = format!(
         "Gi meg et dypdykk i {symbol}.\n\nSanntidsdata fra appen min (JSON):\n{context_json}"
     );
-    call_claude(api_key, SYMBOL_PROMPT, &user, 10000).await
+    call_llm(backend, SYMBOL_PROMPT, &user, 10000).await
+}
+
+async fn call_llm(backend: &Backend, system: &str, user: &str, max_tokens: u32) -> Result<String> {
+    match backend {
+        Backend::Claude { api_key } => call_claude(api_key, system, user, max_tokens).await,
+        Backend::Ollama { url, model } => call_ollama(url, model, system, user, max_tokens).await,
+    }
+}
+
+/// Lokal modell via Ollamas REST-API (http://localhost:11434). Kvaliteten
+/// avhenger helt av modellen — større modell gir bedre analyser.
+async fn call_ollama(url: &str, model: &str, system: &str, user: &str, max_tokens: u32) -> Result<String> {
+    let client = reqwest::Client::builder()
+        // Lokale modeller kan være trege, særlig uten GPU.
+        .timeout(std::time::Duration::from_secs(1800))
+        .build()?;
+
+    let body = json!({
+        "model": model,
+        "stream": false,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "options": {"num_predict": max_tokens},
+    });
+
+    let resp = client
+        .post(format!("{}/api/chat", url.trim_end_matches('/')))
+        .json(&body)
+        .send()
+        .await
+        .context("fikk ikke kontakt med Ollama — er den installert og i gang? (last ned fra ollama.com; den starter automatisk)")?;
+
+    let status = resp.status();
+    let v: Value = resp.json().await.context("ugyldig svar fra Ollama")?;
+    if !status.is_success() {
+        let msg = v.get("error").and_then(Value::as_str).unwrap_or("ukjent feil");
+        anyhow::bail!(
+            "Ollama svarte {status}: {msg}. Mangler modellen? Kjør i ledeteksten: ollama pull {model}"
+        );
+    }
+    let text = v
+        .pointer("/message/content")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    anyhow::ensure!(!text.is_empty(), "tomt svar fra modellen");
+    Ok(text)
 }
 
 async fn call_claude(api_key: &str, system: &str, user: &str, max_tokens: u32) -> Result<String> {

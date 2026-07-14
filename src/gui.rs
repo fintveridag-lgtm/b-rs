@@ -1538,31 +1538,31 @@ impl App {
 
     /// Send Morgan på dypdykk i én bestemt aksje (rapporten vises i 🧠-fanen).
     fn ask_morgan_about(&self, symbol: &str, st: &mut UiState) {
-        let Some(key) = morgan_key(st) else { return };
+        let Some(backend) = morgan_backend(&self.settings.morgan, st) else { return };
         st.morgan_pending = true;
         st.morgan_error = None;
-        st.log(format!("🧠 Morgan dykker ned i {symbol} …"));
+        st.log(format!("🧠 Morgan dykker ned i {symbol} ({}) …", backend.label()));
         let ctx_json = crate::morgan::symbol_context(st, symbol);
         let state = self.state.clone();
         let store = self.store.clone();
         let symbol = symbol.to_string();
         self.rt.spawn(async move {
-            let result = crate::morgan::analyze_symbol(&key, &symbol, &ctx_json).await;
+            let result = crate::morgan::analyze_symbol(&backend, &symbol, &ctx_json).await;
             deliver_morgan_result(&state, &store, result, &format!("Dypdykk {symbol}"), "dypdykket");
         });
     }
 
     /// Be Morgan vurdere hele porteføljen (rapporten vises i 🧠-fanen).
     fn ask_morgan_portfolio(&self, st: &mut UiState) {
-        let Some(key) = morgan_key(st) else { return };
+        let Some(backend) = morgan_backend(&self.settings.morgan, st) else { return };
         st.morgan_pending = true;
         st.morgan_error = None;
-        st.log("🧠 Morgan vurderer porteføljen …");
+        st.log(format!("🧠 Morgan vurderer porteføljen ({}) …", backend.label()));
         let ctx_json = crate::morgan::portfolio_context(st);
         let state = self.state.clone();
         let store = self.store.clone();
         self.rt.spawn(async move {
-            let result = crate::morgan::analyze_portfolio(&key, &ctx_json).await;
+            let result = crate::morgan::analyze_portfolio(&backend, &ctx_json).await;
             deliver_morgan_result(&state, &store, result, "Porteføljevurdering", "porteføljevurderingen");
         });
     }
@@ -2497,6 +2497,36 @@ impl App {
                 });
 
                 ui.add_space(10.0);
+                section_heading(ui, "Morgan (AI-analysesjefen)");
+                egui::Grid::new("innst_morgan").min_col_width(190.0).show(ui, |ui| {
+                    ui.label("Hjerne");
+                    egui::ComboBox::from_id_salt("innst_morgan_provider")
+                        .selected_text(if s.morgan.provider == "ollama" { "ollama (lokal, gratis)" } else { "claude (best kvalitet)" })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut s.morgan.provider, "claude".into(), "claude (best kvalitet)");
+                            ui.selectable_value(&mut s.morgan.provider, "ollama".into(), "ollama (lokal, gratis)");
+                        });
+                    ui.end_row();
+                    if s.morgan.provider == "ollama" {
+                        ui.label("Ollama-adresse");
+                        ui.text_edit_singleline(&mut s.morgan.ollama_url);
+                        ui.end_row();
+                        ui.label("Modell (må være hentet)");
+                        ui.text_edit_singleline(&mut s.morgan.ollama_model);
+                        ui.end_row();
+                    }
+                });
+                if s.morgan.provider == "ollama" {
+                    ui.small(
+                        "Lokal AI: installer Ollama fra ollama.com, kjør «ollama pull llama3.1:8b» i \
+                         ledeteksten, lagre og start appen på nytt. Gratis og privat, men analysene blir \
+                         enklere enn med Claude. Bedre modell hvis PC-en tåler det: qwen2.5:14b eller gpt-oss:20b.",
+                    );
+                } else {
+                    ui.small("Claude krever ANTHROPIC_API_KEY som miljøvariabel (console.anthropic.com).");
+                }
+
+                ui.add_space(10.0);
                 section_heading(ui, "Sparemål");
                 egui::Grid::new("innst_maal").min_col_width(190.0).show(ui, |ui| {
                     ui.label("Målbeløp (kr, 0 = av)");
@@ -2780,16 +2810,16 @@ impl App {
                         )
                         .clicked()
                     {
-                        if let Some(key) = morgan_key(st) {
+                        if let Some(backend) = morgan_backend(&self.settings.morgan, st) {
                             st.morgan_pending = true;
                             st.morgan_error = None;
-                            st.log(format!("🧠 Morgan screener markedet ({}) …", crate::morgan::MODEL));
+                            st.log(format!("🧠 Morgan screener markedet ({}) …", backend.label()));
                             let profile = self.morgan_profile.trim().to_string();
                             let market_json = crate::morgan::market_context(st);
                             let state = self.state.clone();
                             let store = self.store.clone();
                             self.rt.spawn(async move {
-                                let result = crate::morgan::analyze(&key, &profile, &market_json).await;
+                                let result = crate::morgan::analyze(&backend, &profile, &market_json).await;
                                 deliver_morgan_result(&state, &store, result, "Screening", "screeningen");
                             });
                         }
@@ -2846,11 +2876,18 @@ impl App {
                     }
                 });
                 ui.add_space(4.0);
-                ui.label(
-                    RichText::new(format!("modell: {} · krever ANTHROPIC_API_KEY · hver analyse er ett betalt API-kall", crate::morgan::MODEL))
-                        .color(GRAY)
-                        .small(),
-                );
+                let hjerne = if self.settings.morgan.provider == "ollama" {
+                    format!(
+                        "hjerne: {} — kjører lokalt på din PC via Ollama, gratis og privat (byttes i ⚙ Innstillinger)",
+                        self.settings.morgan.ollama_model
+                    )
+                } else {
+                    format!(
+                        "hjerne: {} (Anthropic) · krever ANTHROPIC_API_KEY · hver analyse er ett betalt API-kall (byttes i ⚙ Innstillinger)",
+                        crate::morgan::MODEL
+                    )
+                };
+                ui.label(RichText::new(hjerne).color(GRAY).small());
 
                 // Arkivet: alle tidligere rapporter, klikk for å lese igjen.
                 if !st.morgan_archive.is_empty() {
@@ -3132,9 +3169,11 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
          kursmål, risiko og inngangssoner), DYPDYKK i én aksje (for/imot, nøkkeltall, nivåer og \
          vurdering av posisjonen din), og PORTEFØLJEVURDERING (konsentrasjon, overlapp, hull og tre \
          konkrete grep). Alt basert på appens sanntidsdata.\n\
-         Krever en API-nøkkel fra console.anthropic.com i miljøvariabelen ANTHROPIC_API_KEY \
-         (Windows: setx ANTHROPIC_API_KEY \"sk-ant-…\", start appen på nytt). Hver analyse er ett \
-         betalt API-kall (noen kroner). Fundamentaltallene er fra modellens kunnskap — verifiser før handel.",
+         To hjerner å velge mellom i ⚙ Innstillinger → Morgan: CLAUDE (Anthropic, best kvalitet — krever \
+         API-nøkkel fra console.anthropic.com i miljøvariabelen ANTHROPIC_API_KEY, noen kroner per analyse) \
+         eller OLLAMA (helt lokal modell på din egen PC — gratis, privat og offline: installer fra ollama.com \
+         og kjør «ollama pull llama3.1:8b». Enklere analyser og mer varierende norsk, men koster ingenting). \
+         Uansett hjerne: fundamentaltallene er fra modellens kunnskap — verifiser før handel.",
     ),
     (
         "🗂 Filene appen bruker",
@@ -3298,17 +3337,13 @@ fn sma_series(history: &VecDeque<(f64, f64)>, window: usize) -> Vec<[f64; 2]> {
     out
 }
 
-/// Hent API-nøkkelen til Morgan, eller forklar hva som mangler.
-fn morgan_key(st: &mut UiState) -> Option<String> {
-    match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(key) => Some(key),
-        Err(_) => {
-            st.morgan_error = Some(
-                "Mangler API-nøkkel. Opprett en på console.anthropic.com og sett \
-                 miljøvariabelen ANTHROPIC_API_KEY før du starter appen \
-                 (Windows: setx ANTHROPIC_API_KEY \"sk-ant-…\", start appen på nytt)."
-                    .into(),
-            );
+/// Bygg Morgans hjerne fra konfigurasjonen (Claude eller lokal Ollama),
+/// eller forklar i klartekst hva som mangler.
+fn morgan_backend(cfg: &crate::config::MorganCfg, st: &mut UiState) -> Option<crate::morgan::Backend> {
+    match crate::morgan::backend(cfg) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            st.morgan_error = Some(format!("{e:#}"));
             None
         }
     }

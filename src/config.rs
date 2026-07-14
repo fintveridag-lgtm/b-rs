@@ -53,6 +53,43 @@ pub struct Config {
     /// ^OSEAX = Oslo Børs All-share. Tom streng slår av sammenligningen.
     #[serde(default = "default_benchmark")]
     pub benchmark: String,
+    #[serde(default)]
+    pub morgan: MorganCfg,
+}
+
+/// Hjernen bak Morgan: "claude" (Anthropic API, best kvalitet, krever
+/// API-nøkkel) eller "ollama" (lokal modell på din PC — gratis, privat,
+/// offline, men merkbart svakere analyser).
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct MorganCfg {
+    #[serde(default = "default_morgan_provider")]
+    pub provider: String,
+    /// Hvor Ollama lytter (standard etter installasjon fra ollama.com).
+    #[serde(default = "default_ollama_url")]
+    pub ollama_url: String,
+    /// Modellen Ollama skal bruke — må være hentet med `ollama pull <navn>`.
+    #[serde(default = "default_ollama_model")]
+    pub ollama_model: String,
+}
+
+impl Default for MorganCfg {
+    fn default() -> Self {
+        Self {
+            provider: default_morgan_provider(),
+            ollama_url: default_ollama_url(),
+            ollama_model: default_ollama_model(),
+        }
+    }
+}
+
+fn default_morgan_provider() -> String {
+    "claude".to_string()
+}
+fn default_ollama_url() -> String {
+    "http://localhost:11434".to_string()
+}
+fn default_ollama_model() -> String {
+    "llama3.1:8b".to_string()
 }
 
 fn default_benchmark() -> String {
