@@ -105,6 +105,8 @@ pub struct UiState {
     pub news_symbol: String,
     pub news: Vec<NewsItem>,
     pub news_pending: bool,
+    /// Morgans rapportarkiv: (id, tidspunkt, tittel), nyest først.
+    pub morgan_archive: Vec<(i64, String, String)>,
     /// Daglig egenkapital over tid (unixtid, verdi) — varig historikk.
     pub equity_daily: Vec<(f64, f64)>,
     /// Referanseindeksen (unixtid, kurs) til «slår jeg børsen?»-grafen.
@@ -218,6 +220,7 @@ impl UiState {
             news_symbol: String::new(),
             news: Vec::new(),
             news_pending: false,
+            morgan_archive: Vec::new(),
             equity_daily: Vec::new(),
             benchmark: Vec::new(),
             benchmark_name: String::new(),

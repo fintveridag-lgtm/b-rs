@@ -104,6 +104,15 @@ pub struct NotifyCfg {
     /// Telegram chat-id; bot-token settes i miljøvariabelen TELEGRAM_BOT_TOKEN.
     #[serde(default)]
     pub telegram_chat_id: String,
+    /// Diskret systemlyd ved utført handel og utløst alarm (kun Windows).
+    #[serde(default = "default_true")]
+    pub sound: bool,
+    /// Dagsoppsummering ved børsslutt (ca. 16:30) — krever varsler på.
+    #[serde(default)]
+    pub daily_summary: bool,
+    /// Varsle hvis noe du eier faller mer enn X % på én dag (0 = av).
+    #[serde(default)]
+    pub day_move_alarm_pct: f64,
 }
 
 impl Default for NotifyCfg {
@@ -114,6 +123,9 @@ impl Default for NotifyCfg {
             ntfy_server: default_ntfy_server(),
             ntfy_topic: String::new(),
             telegram_chat_id: String::new(),
+            sound: true,
+            daily_summary: false,
+            day_move_alarm_pct: 0.0,
         }
     }
 }

@@ -59,6 +59,12 @@ Langsiktig innsikt: appen lagrer et **daglig egenkapital-øyeblikksbilde** og
 tegner utviklingen over tid mot en **referanseindeks** (`benchmark` i konfig,
 standard `^OSEAX` = Oslo Børs) — så du ser ærlig om du slår børsen. Porteføljen
 viser også **forventet årlig utbytte** fra beholdningen.
+
+Mer: **Morgan-arkiv** (alle AI-rapporter lagres og kan leses igjen),
+**Nordnet-import** (dra transaksjons-CSV-en inn i appen → ekte portefølje i
+skatterapporten), **dagsfall-varsel** og **dagsoppsummering** ved børsslutt,
+watchlist-**grupper/sortering**, **systemlyd** ved handel, degradert modus med
+tydelig «sist kjente kurser»-varsel, og «📡 Test tilkobling» i Innstillinger.
 | `strategy` | `Strategy`-traiten + `sma_cross`, `rsi`, `momentum`, `macd` og `bollinger` — byttes i appen |
 | `backtest` | Kjør en strategi over historikken og sammenlign med kjøp-og-hold |
 | `risk` | Harde grenser: maks ordreverdi, maks posisjon, ratebegrensning, tapsgrense — pluss stop-loss/take-profit/trailing stop per posisjon |

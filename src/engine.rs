@@ -47,6 +47,8 @@ pub struct Engine {
     fail_streak: u32,
     /// Sist daglig egenkapital-øyeblikksbilde ble skrevet (maks hvert 5. min).
     last_equity_write: Option<std::time::Instant>,
+    /// (dato, symbol)-par som alt har fått dagsfall-varsel — én gang per dag.
+    day_move_alerted: HashSet<(String, String)>,
 }
 
 impl Engine {
@@ -87,6 +89,7 @@ impl Engine {
             fx_failed: HashSet::new(),
             fail_streak: 0,
             last_equity_write: None,
+            day_move_alerted: HashSet::new(),
         })
     }
 
@@ -357,6 +360,9 @@ impl Engine {
             };
             if let Some(alarms) = alarms_snapshot {
                 let _ = self.store.save_alarms(&alarms);
+                if !fired.is_empty() && self.cfg.notify.sound {
+                    crate::notify::beep();
+                }
                 for msg in fired {
                     self.log(msg.clone());
                     self.notify(msg.clone());
@@ -386,6 +392,12 @@ impl Engine {
 
         // 2d) Ukesrapport til mobilen fredag ettermiddag.
         self.maybe_weekly_report(equity);
+
+        // 2e) Dagsfall-alarm: noe du eier faller mer enn grensen på én dag.
+        self.check_day_moves(&fresh, &positions);
+
+        // 2f) Dagsoppsummering ved børsslutt.
+        self.maybe_daily_summary(&fresh, &positions, equity);
 
         // 3) Beskyttende exits: stop-loss / take-profit / trailing stop.
         //    Kjører også under strategipause (beskytter beholdningen),
@@ -800,6 +812,96 @@ impl Engine {
         self.notify(msg);
     }
 
+    /// Én global regel i stedet for én alarm per aksje: varsle når noe i
+    /// beholdningen faller mer enn grensen på én dag. Maks én gang per
+    /// aksje per dag.
+    fn check_day_moves(&mut self, fresh: &[Quote], positions: &[crate::types::Position]) {
+        let limit = self.cfg.notify.day_move_alarm_pct;
+        if limit <= 0.0 {
+            return;
+        }
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        self.day_move_alerted.retain(|(d, _)| d == &today);
+        for p in positions {
+            if p.qty <= 0.0 {
+                continue;
+            }
+            let Some(q) = fresh.iter().find(|q| q.symbol == p.symbol) else { continue };
+            let chg = q.change_pct();
+            if chg <= -limit && self.day_move_alerted.insert((today.clone(), p.symbol.clone())) {
+                let msg = format!("⚠ {} er ned {:.1} % i dag (kurs {:.2}).", p.symbol, -chg, q.last);
+                self.log(msg.clone());
+                self.notify(msg.clone());
+                self.state.lock().unwrap().toast(msg);
+                if self.cfg.notify.sound {
+                    crate::notify::beep();
+                }
+            }
+        }
+    }
+
+    /// Dagsoppsummering rett etter børsslutt (16:30 Oslo-tid, hverdager):
+    /// porteføljens dag, største bevegelser og antall handler.
+    fn maybe_daily_summary(&mut self, fresh: &[Quote], positions: &[crate::types::Position], equity: f64) {
+        use chrono::{Datelike, Timelike, Weekday};
+        if !self.cfg.notify.daily_summary || equity <= 0.0 {
+            return;
+        }
+        let now = chrono::Local::now();
+        if matches!(now.weekday(), Weekday::Sat | Weekday::Sun) {
+            return;
+        }
+        if now.hour() < 16 || (now.hour() == 16 && now.minute() < 30) {
+            return;
+        }
+        let today = now.format("%Y-%m-%d").to_string();
+        if self.store.meta_get("last_daily_summary").as_deref() == Some(today.as_str()) {
+            return;
+        }
+        let _ = self.store.meta_set("last_daily_summary", &today);
+
+        // Dagens bevegelse i kroner: qty × (siste − forrige slutt), i kontovaluta.
+        let mut day_kr = 0.0;
+        let mut moves: Vec<(String, f64)> = Vec::new();
+        for p in positions {
+            if p.qty <= 0.0 {
+                continue;
+            }
+            let Some(q) = fresh.iter().find(|q| q.symbol == p.symbol) else { continue };
+            let rate = self.fx.get(&q.currency).map(|&(r, _)| r).unwrap_or(1.0);
+            day_kr += p.qty * (q.last - q.prev_close) * rate;
+            moves.push((p.symbol.clone(), q.change_pct()));
+        }
+        let day_pct = if equity - day_kr > 0.0 { day_kr / (equity - day_kr) * 100.0 } else { 0.0 };
+        moves.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(std::cmp::Ordering::Equal));
+
+        let trades_today = {
+            let st = self.state.lock().unwrap();
+            let prefix = now.format("%d.%m.%Y").to_string();
+            st.transactions
+                .iter()
+                .filter(|t| t.ts.starts_with(&prefix) && t.status == "FYLT")
+                .count()
+        };
+
+        let mut msg = format!(
+            "🌇 Dagen: {}{:.1} % ({}{:.0} kr). Egenkapital: {:.0} kr.",
+            if day_pct >= 0.0 { "+" } else { "" },
+            day_pct,
+            if day_kr >= 0.0 { "+" } else { "" },
+            day_kr,
+            equity
+        );
+        for (s, pct) in moves.iter().take(4) {
+            msg.push_str(&format!(" {s} {pct:+.1} %."));
+        }
+        if trades_today > 0 {
+            msg.push_str(&format!(" {trades_today} handler i dag."));
+        }
+        self.log(msg.clone());
+        self.notify(msg);
+    }
+
     async fn place(
         &mut self,
         symbol: &str,
@@ -824,6 +926,9 @@ impl Engine {
                     order.side, order.symbol, order.qty, order.avg_price, order.status
                 ));
                 if status != OrderStatus::Rejected {
+                    if self.cfg.notify.sound {
+                        crate::notify::beep();
+                    }
                     self.notify(format!(
                         "{} {} x{:.0} @ {:.2} [{}] — {}",
                         order.side, order.symbol, order.qty, order.avg_price, order.status, order.note

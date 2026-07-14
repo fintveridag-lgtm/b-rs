@@ -98,3 +98,18 @@ impl Notifier {
         Ok(())
     }
 }
+
+/// Diskret systemlyd ved handel/alarm — Windows-innebygd, stille ellers.
+/// Ingen nye avhengigheter: user32::MessageBeep finnes på alle Windows.
+pub fn beep() {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn MessageBeep(u_type: u32) -> i32;
+        }
+        unsafe {
+            MessageBeep(0xFFFF_FFFF);
+        }
+    }
+}

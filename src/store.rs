@@ -69,6 +69,12 @@ impl Store {
             CREATE TABLE IF NOT EXISTS equity_daily (
                 date TEXT PRIMARY KEY,
                 equity REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS morgan_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                title TEXT NOT NULL,
+                report TEXT NOT NULL
             );",
         )?;
         Ok(Self { conn: Mutex::new(conn) })
@@ -245,6 +251,60 @@ impl Store {
             .filter_map(|r| r.ok())
             .collect();
         Ok(plans)
+    }
+
+    /// Arkiver en Morgan-rapport — så gode analyser ikke går tapt ved omstart.
+    pub fn save_morgan_report(&self, title: &str, report: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO morgan_reports (ts, title, report) VALUES (?1, ?2, ?3)",
+            params![chrono::Local::now().format("%d.%m.%Y %H:%M").to_string(), title, report],
+        )?;
+        // Behold de 50 nyeste.
+        conn.execute(
+            "DELETE FROM morgan_reports WHERE id NOT IN
+             (SELECT id FROM morgan_reports ORDER BY id DESC LIMIT 50)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Arkivlisten (id, tidspunkt, tittel), nyest først.
+    pub fn list_morgan_reports(&self) -> Result<Vec<(i64, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT id, ts, title FROM morgan_reports ORDER BY id DESC")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn load_morgan_report(&self, id: i64) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT report FROM morgan_reports WHERE id = ?1", params![id], |r| {
+            r.get(0)
+        })
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    pub fn delete_morgan_report(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM morgan_reports WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Finnes en ordre med denne id-en allerede? (duplikatvern ved import)
+    pub fn has_order_id(&self, id: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT 1 FROM orders WHERE id = ?1 LIMIT 1", params![id], |_| Ok(()))
+            .optional()
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     /// Dagens egenkapital-øyeblikksbilde — én rad per dag, siste verdi vinner.

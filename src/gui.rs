@@ -165,6 +165,9 @@ pub fn run(deps: GuiDeps) -> Result<()> {
         ),
         morgan_symbol: String::new(),
         welcome_open: store_welcome_pending,
+        watch_group: 0,
+        watch_sort_change: false,
+        import_path: String::new(),
     };
     let result = eframe::run_native(
         "b-rs",
@@ -304,6 +307,12 @@ struct App {
     morgan_symbol: String,
     /// Velkomstguiden ved aller første oppstart.
     welcome_open: bool,
+    /// Watchlist-filter: 0 = alle, 1 = Norge (.OL), 2 = utland, 3 = krypto.
+    watch_group: u8,
+    /// Sorter watchlisten etter dagsendring (true = størst fall øverst av/på).
+    watch_sort_change: bool,
+    /// Filsti-feltet for Nordnet-CSV-import.
+    import_path: String,
 }
 
 impl App {
@@ -475,12 +484,15 @@ impl App {
                     let age = (chrono::Utc::now() - ts).num_seconds();
                     let stale_after = (st.poll_secs.max(15) * 4) as i64;
                     if age > stale_after {
-                        // Vakthund: datastrømmen har stoppet.
+                        // Degradert modus: si tydelig at tallene er gamle,
+                        // i stedet for å se «frossen» ut.
+                        let alder = if age >= 120 { format!("{} min", age / 60) } else { format!("{age} s") };
                         ui.label(
-                            RichText::new(format!("⚠ ingen ferske kurser på {age} s"))
+                            RichText::new(format!("⚠ Mistet kontakt med kursleverandøren — viser sist kjente kurser ({alder} gamle)"))
                                 .color(RED)
                                 .strong(),
-                        );
+                        )
+                        .on_hover_text("Appen prøver igjen automatisk hvert tikk. Sjekk nettforbindelsen hvis dette vedvarer.");
                     } else {
                         ui.label(RichText::new(format!("oppdatert {}", ts.format("%H:%M:%S"))).color(GRAY));
                     }
@@ -624,15 +636,46 @@ impl App {
                     self.sync_watchlist(&st.watchlist);
                 }
                 ui.add_space(4.0);
+                // Grupper og sortering: nyttig når listen vokser.
+                ui.horizontal(|ui| {
+                    for (i, label) in [(0u8, "Alle"), (1, "🇳🇴 Norge"), (2, "🌍 Utland"), (3, "₿ Krypto")] {
+                        if ui.selectable_label(self.watch_group == i, RichText::new(label).small()).clicked() {
+                            self.watch_group = i;
+                        }
+                    }
+                });
+                let group_ok = |symbol: &str| match self.watch_group {
+                    1 => symbol.ends_with(".OL"),
+                    2 => !symbol.ends_with(".OL") && !crate::types::is_crypto(symbol),
+                    3 => crate::types::is_crypto(symbol),
+                    _ => true,
+                };
+                let mut visning: Vec<&crate::types::Quote> =
+                    st.quotes.values().filter(|q| group_ok(&q.symbol)).collect();
+                if self.watch_sort_change {
+                    visning.sort_by(|a, b| {
+                        b.change_pct()
+                            .abs()
+                            .partial_cmp(&a.change_pct().abs())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
                 let mut unfollow: Option<String> = None;
                 egui::Grid::new("watchlist").striped(true).min_col_width(58.0).show(ui, |ui| {
                     ui.label(RichText::new("Symbol").strong().color(GRAY));
                     ui.label(RichText::new("Siste").strong().color(GRAY));
-                    ui.label(RichText::new("Endring").strong().color(GRAY));
+                    let pil = if self.watch_sort_change { "⬍ Endring" } else { "Endring" };
+                    if ui
+                        .add(egui::Label::new(RichText::new(pil).strong().color(GRAY)).sense(egui::Sense::click()))
+                        .on_hover_text("Klikk: sorter etter størst bevegelse i dag")
+                        .clicked()
+                    {
+                        self.watch_sort_change = !self.watch_sort_change;
+                    }
                     ui.label(RichText::new("30 dager").strong().color(GRAY));
                     ui.label("");
                     ui.end_row();
-                    for q in st.quotes.values() {
+                    for q in visning {
                         let selected = self.selected.as_deref() == Some(q.symbol.as_str());
                         if ui.selectable_label(selected, RichText::new(&q.symbol).strong()).clicked() {
                             self.selected = Some(q.symbol.clone());
@@ -1501,10 +1544,11 @@ impl App {
         st.log(format!("🧠 Morgan dykker ned i {symbol} …"));
         let ctx_json = crate::morgan::symbol_context(st, symbol);
         let state = self.state.clone();
+        let store = self.store.clone();
         let symbol = symbol.to_string();
         self.rt.spawn(async move {
             let result = crate::morgan::analyze_symbol(&key, &symbol, &ctx_json).await;
-            deliver_morgan_result(&state, result, "dypdykket");
+            deliver_morgan_result(&state, &store, result, &format!("Dypdykk {symbol}"), "dypdykket");
         });
     }
 
@@ -1516,9 +1560,10 @@ impl App {
         st.log("🧠 Morgan vurderer porteføljen …");
         let ctx_json = crate::morgan::portfolio_context(st);
         let state = self.state.clone();
+        let store = self.store.clone();
         self.rt.spawn(async move {
             let result = crate::morgan::analyze_portfolio(&key, &ctx_json).await;
-            deliver_morgan_result(&state, result, "porteføljevurderingen");
+            deliver_morgan_result(&state, &store, result, "Porteføljevurdering", "porteføljevurderingen");
         });
     }
 
@@ -2176,6 +2221,55 @@ impl App {
         });
     }
 
+    /// Les en Nordnet-CSV, hopp over duplikater, og legg handlene inn i
+    /// ordreloggen — da teller de med i gevinst/tap og skatterapporten.
+    fn import_nordnet_csv(&self, path: &std::path::Path, st: &mut UiState) {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                st.toast(format!("Fant ikke filen: {e}"));
+                return;
+            }
+        };
+        let trades = match crate::import::parse_nordnet_csv(&bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                st.toast(format!("Import feilet: {e:#}"));
+                st.log(format!("📥 Import av {} feilet: {e:#}", path.display()));
+                return;
+            }
+        };
+        let (mut nye, mut duplikater) = (0usize, 0usize);
+        for t in &trades {
+            if self.store.has_order_id(&t.id) {
+                duplikater += 1;
+                continue;
+            }
+            let order = crate::types::Order {
+                id: t.id.clone(),
+                symbol: t.symbol.clone(),
+                side: if t.is_buy { Side::Buy } else { Side::Sell },
+                qty: t.qty,
+                status: crate::types::OrderStatus::Filled,
+                avg_price: t.price,
+                created: chrono::DateTime::parse_from_rfc3339(&t.ts_rfc3339)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                note: "Nordnet-import".into(),
+            };
+            if self.store.record_order(&order, "nordnet-import").is_ok() {
+                nye += 1;
+            }
+        }
+        st.transactions = self.store.recent_orders(500).unwrap_or_default();
+        let msg = format!(
+            "📥 Import: {nye} handler lagt inn, {duplikater} hoppet over som duplikater ({} rader lest).",
+            trades.len()
+        );
+        st.log(msg.clone());
+        st.toast(msg);
+    }
+
     fn transactions_view(&mut self, ctx: &egui::Context, st: &mut UiState) {
         let realized = self.realized(st).to_vec();
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -2207,6 +2301,32 @@ impl App {
                 }
                 ui.label(RichText::new("(semikolon-separert — åpnes rett i Excel)").small().color(GRAY));
             });
+
+            // Import fra Nordnet: dra CSV-filen inn i vinduet, eller lim inn stien.
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("📥 Nordnet-import:").strong());
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.import_path)
+                        .hint_text("sti til transaksjonsfil.csv — eller dra filen hit")
+                        .desired_width(320.0),
+                );
+                if ui.button("Importer").clicked() && !self.import_path.trim().is_empty() {
+                    let path = self.import_path.trim().to_string();
+                    self.import_nordnet_csv(std::path::Path::new(&path), st);
+                }
+            });
+            ui.small(
+                "Eksporter «Transaksjoner og notater» fra Nordnet og importer her — da får appen den \
+                 ekte porteføljen din inn i gevinst/tap- og skatterapporten. Duplikater hoppes over.",
+            );
+            // Dra-og-slipp: enkleste veien inn.
+            let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
+                i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect()
+            });
+            for path in dropped {
+                self.import_nordnet_csv(&path, st);
+            }
             ui.add_space(6.0);
             egui::ScrollArea::vertical().id_salt("tx_view").show(ui, |ui| {
                 egui::Grid::new("tx_grid").striped(true).min_col_width(60.0).show(ui, |ui| {
@@ -2408,6 +2528,47 @@ impl App {
                     ui.label("Telegram chat-id");
                     ui.text_edit_singleline(&mut s.notify.telegram_chat_id);
                     ui.end_row();
+                    ui.label("Lyd ved handel og alarm");
+                    ui.checkbox(&mut s.notify.sound, "");
+                    ui.end_row();
+                    ui.label("Dagsoppsummering ved børsslutt (16:30)");
+                    ui.checkbox(&mut s.notify.daily_summary, "");
+                    ui.end_row();
+                    ui.label("Varsle ved dagsfall i beholdning (%, 0 = av)");
+                    ui.add(egui::DragValue::new(&mut s.notify.day_move_alarm_pct).range(0.0..=50.0).speed(0.5));
+                    ui.end_row();
+                });
+
+                ui.add_space(10.0);
+                section_heading(ui, "Tilkobling");
+                ui.horizontal(|ui| {
+                    if ui.button("📡 Test tilkobling til kursleverandøren").clicked() {
+                        st.toast("Tester tilkobling til Yahoo Finance …");
+                        let market = self.market.clone();
+                        let state = self.state.clone();
+                        self.rt.spawn(async move {
+                            let start = std::time::Instant::now();
+                            let result = market.quote("EQNR.OL").await;
+                            let mut st = state.lock().unwrap();
+                            match result {
+                                Ok(q) => {
+                                    let msg = format!(
+                                        "📡 Tilkobling OK: EQNR.OL = {:.2} {} (svar på {} ms).",
+                                        q.last,
+                                        q.currency,
+                                        start.elapsed().as_millis()
+                                    );
+                                    st.log(msg.clone());
+                                    st.toast(msg);
+                                }
+                                Err(e) => {
+                                    let msg = format!("📡 Tilkobling FEILET: {e:#}");
+                                    st.log(msg.clone());
+                                    st.toast(msg);
+                                }
+                            }
+                        });
+                    }
                 });
 
                 // Autostart med Windows.
@@ -2626,9 +2787,10 @@ impl App {
                             let profile = self.morgan_profile.trim().to_string();
                             let market_json = crate::morgan::market_context(st);
                             let state = self.state.clone();
+                            let store = self.store.clone();
                             self.rt.spawn(async move {
                                 let result = crate::morgan::analyze(&key, &profile, &market_json).await;
-                                deliver_morgan_result(&state, result, "screeningen");
+                                deliver_morgan_result(&state, &store, result, "Screening", "screeningen");
                             });
                         }
                     }
@@ -2689,6 +2851,42 @@ impl App {
                         .color(GRAY)
                         .small(),
                 );
+
+                // Arkivet: alle tidligere rapporter, klikk for å lese igjen.
+                if !st.morgan_archive.is_empty() {
+                    ui.add_space(6.0);
+                    egui::CollapsingHeader::new(
+                        RichText::new(format!("🗄 Tidligere rapporter ({})", st.morgan_archive.len())).strong(),
+                    )
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        let mut open_id: Option<i64> = None;
+                        let mut delete_id: Option<i64> = None;
+                        for (id, ts, title) in &st.morgan_archive {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("🗑").clicked() {
+                                    delete_id = Some(*id);
+                                }
+                                if ui
+                                    .link(RichText::new(format!("{ts} — {title}")).small())
+                                    .clicked()
+                                {
+                                    open_id = Some(*id);
+                                }
+                            });
+                        }
+                        if let Some(id) = open_id {
+                            if let Some(report) = self.store.load_morgan_report(id) {
+                                st.morgan_report = Some(report);
+                                st.morgan_error = None;
+                            }
+                        }
+                        if let Some(id) = delete_id {
+                            let _ = self.store.delete_morgan_report(id);
+                            st.morgan_archive = self.store.list_morgan_reports().unwrap_or_default();
+                        }
+                    });
+                }
 
                 if let Some(err) = &st.morgan_error {
                     ui.add_space(6.0);
@@ -2884,6 +3082,20 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
          Ukesrapport: har du mobilvarsler på, får du hver fredag ettermiddag en oppsummering av uken \
          — porteføljens utvikling, beste og svakeste aksje.\n\
          Alt utføres gjennom risikoreglene og stoppes av kill switch. Begge deler overlever omstart.",
+    ),
+    (
+        "📥 Import fra Nordnet",
+        "Logg inn på Nordnet → Transaksjoner og notater → Eksporter (CSV). Dra filen inn i \
+         💳 Transaksjoner-fanen (eller lim inn stien og trykk Importer). Kjøp og salg legges inn i \
+         historikken — da regnes realisert gevinst/tap og skatterapporten på den EKTE porteføljen din. \
+         Importen kan kjøres flere ganger; duplikater hoppes over automatisk.",
+    ),
+    (
+        "🔔 Smarte varsler",
+        "Utover kursalarmene: i ⚙ Innstillinger → Mobilvarsler kan du slå på DAGSFALL-VARSEL \
+         («si fra hvis noe jeg eier faller mer enn X % på én dag» — én regel for hele porteføljen), \
+         DAGSOPPSUMMERING ved børsslutt (16:30), og LYD ved handel og alarm. Ukesrapporten kommer \
+         fredag ettermiddag hvis varsler er på.",
     ),
     (
         "🎯 Sparemål",
@@ -3102,12 +3314,15 @@ fn morgan_key(st: &mut UiState) -> Option<String> {
     }
 }
 
-/// Felles landing for alle Morgan-svar: rapport eller feilmelding inn i tilstanden.
-fn deliver_morgan_result(state: &SharedState, result: Result<String>, hva: &str) {
+/// Felles landing for alle Morgan-svar: rapport eller feilmelding inn i
+/// tilstanden — og vellykkede rapporter rett i arkivet.
+fn deliver_morgan_result(state: &SharedState, store: &Store, result: Result<String>, tittel: &str, hva: &str) {
     let mut st = state.lock().unwrap();
     st.morgan_pending = false;
     match result {
         Ok(report) => {
+            let _ = store.save_morgan_report(tittel, &report);
+            st.morgan_archive = store.list_morgan_reports().unwrap_or_default();
             st.morgan_report = Some(report);
             st.toast(format!("🧠 Morgan er ferdig med {hva}."));
             st.log(format!("🧠 Morgan leverte {hva}."));
