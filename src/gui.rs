@@ -1641,9 +1641,26 @@ impl App {
                 _ => GREEN,
             };
 
+            // Grafen viser instrumentets egen valuta (USD for krypto og
+            // amerikanske aksjer), mens posisjoner og fyllte ordrer lagres i
+            // kroner. Kjøpskurslinjen og ▲/▼-merkene må derfor regnes om
+            // med valutakursen, ellers havner de langt utenfor grafen.
+            // (Dagens kurs brukes også for gamle handler — nær nok til visning.)
+            let fx_rate = st
+                .quotes
+                .get(&symbol)
+                .filter(|q| !q.currency.is_empty())
+                .and_then(|q| st.fx_rates.get(&q.currency).copied())
+                .unwrap_or(1.0);
+            let til_instrument = move |nok: f64| nok / fx_rate;
+
             // Posisjonen i denne aksjen (om noen) — gir kjøpskurs- og
             // sikkerhetsnett-linjene i grafen.
-            let posisjon = st.positions.iter().find(|p| p.symbol == symbol).cloned();
+            let posisjon = st.positions.iter().find(|p| p.symbol == symbol).cloned().map(|mut p| {
+                p.avg_price = til_instrument(p.avg_price);
+                p.last = til_instrument(p.last);
+                p
+            });
             let (stop_pct, profit_pct) =
                 (self.settings.risk.stop_loss_pct, self.settings.risk.take_profit_pct);
 
@@ -1654,9 +1671,9 @@ impl App {
                 for (sym, ts, is_buy, price) in self.chart_fills(st) {
                     if sym == &symbol && cutoff.is_none_or(|c| *ts >= c) {
                         if *is_buy {
-                            buys.push([*ts, *price]);
+                            buys.push([*ts, til_instrument(*price)]);
                         } else {
-                            sells.push([*ts, *price]);
+                            sells.push([*ts, til_instrument(*price)]);
                         }
                     }
                 }
