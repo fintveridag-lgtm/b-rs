@@ -281,15 +281,21 @@ pub fn generate_keypair(path: &std::path::Path) -> Result<String> {
     let key = SigningKey::generate(&mut rand_core::OsRng);
     // Default::default() = plattformens linjeskift — typen er ikke
     // re-eksportert fra ed25519-dalek, men trengs heller ikke ved navn.
+    // Windows gir CRLF; vi normaliserer til LF, som kresne webskjemaer
+    // og PEM-verktøy forventer.
     let private_pem = key
         .to_pkcs8_pem(Default::default())
-        .map_err(|e| anyhow::anyhow!("klarte ikke kode privatnøkkelen: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("klarte ikke kode privatnøkkelen: {e}"))?
+        .replace("\r\n", "\n");
     std::fs::write(path, private_pem.as_bytes())
         .with_context(|| format!("klarte ikke skrive {}", path.display()))?;
     let public_pem = key
         .verifying_key()
         .to_public_key_pem(Default::default())
-        .map_err(|e| anyhow::anyhow!("klarte ikke kode offentlig nøkkel: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("klarte ikke kode offentlig nøkkel: {e}"))?
+        .replace("\r\n", "\n")
+        .trim_end()
+        .to_string();
     Ok(public_pem)
 }
 
