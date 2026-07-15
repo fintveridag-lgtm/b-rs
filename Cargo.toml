@@ -23,7 +23,8 @@ async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
-ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 crossterm = "0.28"
 eframe = "0.29"
 egui_plot = "0.29"

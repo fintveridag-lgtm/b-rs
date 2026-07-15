@@ -264,6 +264,35 @@ impl Broker for RevolutXBroker {
     }
 }
 
+/// Lag et nytt Ed25519-nøkkelpar uten openssl: privatnøkkelen skrives til
+/// `path` (PKCS#8 PEM), og den OFFENTLIGE nøkkelen returneres — det er den
+/// som skal limes inn i Revolut X → Settings → API keys.
+///
+/// Nekter å overskrive en eksisterende fil: en registrert nøkkel som
+/// overskrives er tapt for alltid.
+pub fn generate_keypair(path: &std::path::Path) -> Result<String> {
+    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+
+    anyhow::ensure!(
+        !path.exists(),
+        "{} finnes allerede — slett eller flytt den gamle først (en registrert nøkkel som overskrives er tapt)",
+        path.display()
+    );
+    let key = SigningKey::generate(&mut rand_core::OsRng);
+    // Default::default() = plattformens linjeskift — typen er ikke
+    // re-eksportert fra ed25519-dalek, men trengs heller ikke ved navn.
+    let private_pem = key
+        .to_pkcs8_pem(Default::default())
+        .map_err(|e| anyhow::anyhow!("klarte ikke kode privatnøkkelen: {e}"))?;
+    std::fs::write(path, private_pem.as_bytes())
+        .with_context(|| format!("klarte ikke skrive {}", path.display()))?;
+    let public_pem = key
+        .verifying_key()
+        .to_public_key_pem(Default::default())
+        .map_err(|e| anyhow::anyhow!("klarte ikke kode offentlig nøkkel: {e}"))?;
+    Ok(public_pem)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +325,27 @@ mod tests {
         // og base64-koding gir gyldig tekst
         let encoded = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
         assert!(!encoded.is_empty());
+    }
+
+    #[test]
+    fn generated_keypair_roundtrips_and_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!("b-rs-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("revolutx.pem");
+
+        let public = generate_keypair(&path).unwrap();
+        assert!(public.contains("BEGIN PUBLIC KEY"));
+        // Privatnøkkelen på disk kan leses tilbake og hører til samme par.
+        let pem = std::fs::read_to_string(&path).unwrap();
+        assert!(pem.contains("BEGIN PRIVATE KEY"));
+        let key = SigningKey::from_pkcs8_pem(&pem).unwrap();
+        use ed25519_dalek::pkcs8::EncodePublicKey;
+        let roundtrip: String = key.verifying_key().to_public_key_pem(Default::default()).unwrap();
+        assert_eq!(roundtrip, public);
+        // Aldri overskriv en eksisterende nøkkel.
+        assert!(generate_keypair(&path).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

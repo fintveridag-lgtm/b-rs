@@ -174,6 +174,7 @@ pub fn run(deps: GuiDeps) -> Result<()> {
         watch_group: 0,
         watch_sort_change: false,
         import_path: String::new(),
+        revolutx_pubkey: None,
     };
     let result = eframe::run_native(
         "b-rs",
@@ -323,6 +324,9 @@ struct App {
     watch_sort_change: bool,
     /// Filsti-feltet for Nordnet-CSV-import.
     import_path: String,
+    /// Offentlig nøkkel fra «Generer Revolut X-nøkkelpar» — vises til
+    /// brukeren for innliming hos Revolut.
+    revolutx_pubkey: Option<String>,
 }
 
 impl App {
@@ -2739,6 +2743,59 @@ impl App {
                     ui.add(egui::DragValue::new(&mut s.notify.day_move_alarm_pct).range(0.0..=50.0).speed(0.5));
                     ui.end_row();
                 });
+
+                ui.add_space(10.0);
+                section_heading(ui, "Revolut X (krypto, live-handel)");
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("🔑 Generer nøkkelpar")
+                        .on_hover_text("Lager revolutx.pem ved siden av config.toml — ingen openssl nødvendig")
+                        .clicked()
+                    {
+                        let dir = self
+                            .config_path
+                            .parent()
+                            .filter(|p| !p.as_os_str().is_empty())
+                            .unwrap_or(std::path::Path::new("."))
+                            .to_path_buf();
+                        let path = dir.join("revolutx.pem");
+                        match crate::broker::revolutx::generate_keypair(&path) {
+                            Ok(public) => {
+                                st.log(format!("🔑 Nøkkelpar laget: {}", path.display()));
+                                st.toast("Nøkkelpar laget — lim den offentlige nøkkelen inn hos Revolut X.");
+                                self.revolutx_pubkey = Some(public);
+                            }
+                            Err(e) => {
+                                st.toast(format!("Nøkkelgenerering feilet: {e:#}"));
+                                st.log(format!("🔑 Nøkkelgenerering feilet: {e:#}"));
+                            }
+                        }
+                    }
+                    ui.label(
+                        RichText::new("Lager revolutx.pem lokalt. Privatnøkkelen forlater aldri PC-en din.")
+                            .color(GRAY)
+                            .small(),
+                    );
+                });
+                if let Some(public) = self.revolutx_pubkey.clone() {
+                    ui.small("Lim denne OFFENTLIGE nøkkelen inn i Revolut X → Settings → API keys:");
+                    let mut vis = public.clone();
+                    ui.add(
+                        egui::TextEdit::multiline(&mut vis)
+                            .desired_rows(4)
+                            .desired_width(f32::INFINITY)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    if ui.button("📋 Kopier offentlig nøkkel").clicked() {
+                        ctx.copy_text(public);
+                        st.toast("Offentlig nøkkel kopiert.");
+                    }
+                    ui.small(
+                        "Deretter: sett REVOLUTX_API_KEY (setx REVOLUTX_API_KEY \"...\"), og i config.toml: \
+                         mode = \"live\", broker = \"revolutx\", live_ok = true og [revolutx] private_key_path = \"revolutx.pem\". \
+                         Start appen på nytt.",
+                    );
+                }
 
                 ui.add_space(10.0);
                 section_heading(ui, "Tilkobling");
