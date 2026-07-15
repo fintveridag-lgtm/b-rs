@@ -2672,6 +2672,32 @@ impl App {
                 }
 
                 ui.add_space(10.0);
+                section_heading(ui, "🤖 Morgan Autopilot (eksperimentelt)");
+                egui::Grid::new("innst_autopilot").min_col_width(190.0).show(ui, |ui| {
+                    ui.label("Autopilot på (krever omstart)");
+                    ui.checkbox(&mut s.morgan.autopilot.enabled, "");
+                    ui.end_row();
+                    ui.label("Symbol (kun dette ene)");
+                    ui.text_edit_singleline(&mut s.morgan.autopilot.symbol);
+                    ui.end_row();
+                    ui.label("Budsjett (kr, hard grense)");
+                    ui.add(egui::DragValue::new(&mut s.morgan.autopilot.budget_kr).range(100.0..=1_000_000.0).speed(100));
+                    ui.end_row();
+                    ui.label("Minutter mellom vurderinger (min 15)");
+                    ui.add(egui::DragValue::new(&mut s.morgan.autopilot.interval_min).range(15..=1440));
+                    ui.end_row();
+                    ui.label("Maks handler per dag");
+                    ui.add(egui::DragValue::new(&mut s.morgan.autopilot.max_trades_per_day).range(1..=20));
+                    ui.end_row();
+                });
+                ui.small(
+                    "AI-en vurderer symbolet med jevne mellomrom og kjøper/selger innenfor budsjettet — \
+                     gjennom risikoreglene, stoppet av kill switch og ⏸ pause. Hver vurdering er ett \
+                     AI-kall (velg gjerne Ollama for gratis drift). EKSPERIMENTELT: kjør i papirmodus. \
+                     Kursene er ~15 min forsinket — dette er ingen pengemaskin.",
+                );
+
+                ui.add_space(10.0);
                 section_heading(ui, "Sparemål");
                 egui::Grid::new("innst_maal").min_col_width(190.0).show(ui, |ui| {
                     ui.label("Målbeløp (kr, 0 = av)");
@@ -3125,6 +3151,35 @@ impl App {
                 };
                 ui.label(RichText::new(hjerne).color(GRAY).small());
 
+                // 🤖 Autopilot-status, når den er på.
+                if self.settings.morgan.autopilot.enabled {
+                    ui.add_space(6.0);
+                    egui::Frame::none()
+                        .fill(BG_CARD_LIGHT)
+                        .stroke(egui::Stroke::new(1.0, BORDER))
+                        .rounding(egui::Rounding::same(8.0))
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(RichText::new("🤖 Autopilot").strong().color(Color32::WHITE));
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} · budsjett {} kr · hvert {}. min · maks {}/dag",
+                                        self.settings.morgan.autopilot.symbol,
+                                        fmt_thousands(self.settings.morgan.autopilot.budget_kr),
+                                        self.settings.morgan.autopilot.interval_min.max(15),
+                                        self.settings.morgan.autopilot.max_trades_per_day
+                                    ))
+                                    .color(TEXT_LIGHT)
+                                    .small(),
+                                );
+                                if let Some(status) = &st.autopilot_status {
+                                    ui.label(RichText::new(format!("Siste: {status}")).color(YELLOW).small());
+                                }
+                            });
+                        });
+                }
+
                 // Arkivet: alle tidligere rapporter, klikk for å lese igjen.
                 if !st.morgan_archive.is_empty() {
                     ui.add_space(6.0);
@@ -3412,7 +3467,12 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
          API-nøkkel fra console.anthropic.com i miljøvariabelen ANTHROPIC_API_KEY, noen kroner per analyse) \
          eller OLLAMA (helt lokal modell på din egen PC — gratis, privat og offline: installer fra ollama.com \
          og kjør «ollama pull llama3.1:8b». Enklere analyser og mer varierende norsk, men koster ingenting). \
-         Uansett hjerne: fundamentaltallene er fra modellens kunnskap — verifiser før handel.",
+         Uansett hjerne: fundamentaltallene er fra modellens kunnskap — verifiser før handel.\n\
+         🤖 AUTOPILOT (Innstillinger → Morgan): la AI-en handle ETT symbol automatisk innenfor et \
+         lite, hardt budsjett (f.eks. 1 000 kr i BTC-USD). Den vurderer med jevne mellomrom, svarer \
+         KJØP/SELG/AVVENT med begrunnelse (ses i loggen og 🧠-fanen), og alt går gjennom \
+         risikoreglene, kill switch og pause. Eksperimentelt — kjør i papirmodus, og husk at hver \
+         vurdering koster et AI-kall (gratis med Ollama).",
     ),
     (
         "🗂 Filene appen bruker",

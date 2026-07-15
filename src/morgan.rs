@@ -381,3 +381,255 @@ async fn call_claude(api_key: &str, system: &str, user: &str, max_tokens: u32) -
     }
     Ok(report)
 }
+
+// ---------------------------------------------------------------------------
+// 🤖 Morgan Autopilot: automatisk handel i ETT symbol innenfor et lite,
+// hardt budsjett. Hver beslutning er ett LLM-kall som må svare i streng
+// JSON; alt annet behandles som AVVENT. Ordrene går gjennom den manuelle
+// køen og dermed risikoreglene og kill switch-en, som alt annet.
+// ---------------------------------------------------------------------------
+
+const AUTOPILOT_PROMPT: &str = r#"Du er «Morgan», og forvalter et lite, eksperimentelt handelsbudsjett i ETT instrument for brukeren. Du får et JSON-øyeblikksbilde: kurs, RSI, trend, kurshistorikk, posisjonen din og hvor mye av budsjettet som er ledig.
+
+Svar KUN med et JSON-objekt på nøyaktig denne formen, uten annen tekst:
+{"beslutning": "KJØP" | "SELG" | "AVVENT", "belop_kr": <tall>, "begrunnelse": "<én kort setning på norsk>"}
+
+Regler:
+- belop_kr er beløpet i kroner du vil kjøpe eller selge for. Ved AVVENT: 0.
+- Du kan aldri kjøpe for mer enn "ledig_budsjett_kr", og aldri selge mer enn du eier.
+- Kursdataene er ca. 15 minutter forsinket — intradag-støy er upålitelig. Handle bare på tydelige signaler (klar trend, tydelig oversolgt/overkjøpt); ellers AVVENT.
+- Små gevinster spises av spread og støy: ikke kjøp og selg samme dag uten sterk grunn.
+- Vær disiplinert: AVVENT er som regel riktig svar."#;
+
+/// Autopilotens beslutning, tolket fra modellens JSON-svar.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AutopilotDecision {
+    Buy { amount_kr: f64, reason: String },
+    Sell { amount_kr: f64, reason: String },
+    Hold { reason: String },
+}
+
+/// Tolk modellens svar. Modeller pakker ofte JSON i ```-gjerder eller
+/// legger på prat — vi leter frem første {...}-blokk og er strenge på resten.
+pub(crate) fn parse_autopilot_decision(text: &str) -> Result<AutopilotDecision> {
+    let start = text.find('{').context("fant ingen JSON i svaret")?;
+    let end = text.rfind('}').context("fant ingen JSON-slutt i svaret")?;
+    let v: Value = serde_json::from_str(&text[start..=end]).context("ugyldig JSON fra modellen")?;
+
+    let beslutning = v
+        .get("beslutning")
+        .and_then(Value::as_str)
+        .context("mangler «beslutning»")?
+        .to_uppercase();
+    let amount_kr = v.get("belop_kr").and_then(Value::as_f64).unwrap_or(0.0).abs();
+    let reason = v
+        .get("begrunnelse")
+        .and_then(Value::as_str)
+        .unwrap_or("(ingen begrunnelse)")
+        .to_string();
+
+    match beslutning.as_str() {
+        "KJØP" | "KJOP" if amount_kr > 0.0 => Ok(AutopilotDecision::Buy { amount_kr, reason }),
+        "SELG" if amount_kr > 0.0 => Ok(AutopilotDecision::Sell { amount_kr, reason }),
+        _ => Ok(AutopilotDecision::Hold { reason }),
+    }
+}
+
+/// Ett beslutningskall til valgt bakende.
+pub async fn autopilot_decide(backend: &Backend, context_json: &str) -> Result<AutopilotDecision> {
+    let user = format!("Her er øyeblikksbildet (JSON):\n{context_json}\n\nHva gjør vi nå?");
+    let text = call_llm(backend, AUTOPILOT_PROMPT, &user, 1000).await?;
+    parse_autopilot_decision(&text)
+}
+
+/// Bakgrunnsoppgaven: vurder symbolet med jevne mellomrom og legg eventuelle
+/// ordrer i den manuelle køen (risikosjekkes og utføres av motoren).
+pub async fn autopilot_task(
+    cfg: crate::config::Config,
+    state: crate::state::SharedState,
+    flags: std::sync::Arc<crate::state::Flags>,
+) {
+    use std::sync::atomic::Ordering;
+
+    let ap = cfg.morgan.autopilot.clone();
+    let backend = match backend(&cfg.morgan) {
+        Ok(b) => b,
+        Err(e) => {
+            state.lock().unwrap().log(format!("🤖 Autopilot kunne ikke starte: {e:#}"));
+            return;
+        }
+    };
+    {
+        let mut st = state.lock().unwrap();
+        st.log(format!(
+            "🤖 Morgan Autopilot PÅ: {} med budsjett {:.0} kr, vurdering hvert {}. minutt, maks {} handler/dag ({}).",
+            ap.symbol,
+            ap.budget_kr,
+            ap.interval_min.max(15),
+            ap.max_trades_per_day,
+            backend.label()
+        ));
+        st.autopilot_status = Some("Venter på første vurdering …".into());
+    }
+
+    let mut interval =
+        tokio::time::interval(std::time::Duration::from_secs(ap.interval_min.max(15) * 60));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut trades_today: u32 = 0;
+    let mut trades_date = String::new();
+
+    while !flags.quit.load(Ordering::Relaxed) {
+        interval.tick().await;
+        if flags.quit.load(Ordering::Relaxed) {
+            break;
+        }
+        // Kill switch og strategipause stopper også autopiloten.
+        if flags.killed.load(Ordering::Relaxed) || flags.paused.load(Ordering::Relaxed) {
+            continue;
+        }
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        if trades_date != today {
+            trades_date = today;
+            trades_today = 0;
+        }
+
+        // Bygg øyeblikksbildet fra appens egne data.
+        let (ctx_json, price_nok, held_qty) = {
+            let st = state.lock().unwrap();
+            let Some(q) = st.quotes.get(&ap.symbol) else {
+                drop(st);
+                continue; // kursen er ikke hentet ennå
+            };
+            let rate = if q.currency.is_empty() {
+                1.0
+            } else {
+                st.fx_rates.get(&q.currency).copied().unwrap_or(1.0)
+            };
+            let price_nok = q.last * rate;
+            let pos = st.positions.iter().find(|p| p.symbol == ap.symbol);
+            let held_qty = pos.map_or(0.0, |p| p.qty);
+            let held_value = pos.map_or(0.0, |p| p.qty * p.last);
+            let closes: Vec<f64> = st
+                .history
+                .get(&ap.symbol)
+                .map(|h| h.iter().rev().take(48).rev().map(|&(_, p)| p).collect())
+                .unwrap_or_default();
+            let ctx = json!({
+                "symbol": ap.symbol,
+                "kurs": q.last,
+                "valuta": q.currency,
+                "endring_i_dag_pct": q.change_pct(),
+                "rsi_14": crate::market::rsi(&closes, 14),
+                "siste_kurser": closes,
+                "posisjon": {"antall": held_qty, "verdi_kr": held_value,
+                              "urealisert_kr": pos.map_or(0.0, |p| p.unrealized())},
+                "budsjett_kr": ap.budget_kr,
+                "ledig_budsjett_kr": (ap.budget_kr - held_value).max(0.0),
+                "kontanter_kr": st.cash,
+                "handler_i_dag": trades_today,
+                "maks_handler_per_dag": ap.max_trades_per_day,
+            })
+            .to_string();
+            (ctx, price_nok, held_qty)
+        };
+        if price_nok <= 0.0 {
+            continue;
+        }
+        if trades_today >= ap.max_trades_per_day {
+            continue; // dagens kvote er brukt
+        }
+
+        let decision = match autopilot_decide(&backend, &ctx_json).await {
+            Ok(d) => d,
+            Err(e) => {
+                state.lock().unwrap().log(format!("🤖 Autopilot-vurdering feilet: {e:#}"));
+                continue;
+            }
+        };
+
+        let klokke = chrono::Local::now().format("%H:%M");
+        let mut st = state.lock().unwrap();
+        match decision {
+            AutopilotDecision::Hold { reason } => {
+                st.autopilot_status = Some(format!("{klokke} AVVENT — {reason}"));
+                st.log(format!("🤖 Autopilot: AVVENT — {reason}"));
+            }
+            AutopilotDecision::Buy { amount_kr, reason } => {
+                // Hard grense: aldri over budsjettet, aldri over kontantene.
+                let held_value = held_qty * price_nok;
+                let ledig = (ap.budget_kr - held_value).max(0.0).min(st.cash);
+                let belop = amount_kr.min(ledig);
+                let qty = if crate::types::is_crypto(&ap.symbol) {
+                    belop / price_nok
+                } else {
+                    (belop / price_nok).floor()
+                };
+                if qty > 0.0 && belop > 1.0 {
+                    trades_today += 1;
+                    st.manual_orders.push_back((ap.symbol.clone(), crate::types::Side::Buy, qty));
+                    let msg = format!("🤖 Autopilot: KJØP {} for {belop:.0} kr — {reason}", ap.symbol);
+                    st.autopilot_status = Some(format!("{klokke} {msg}"));
+                    st.log(msg.clone());
+                    st.toast(msg);
+                } else {
+                    st.autopilot_status =
+                        Some(format!("{klokke} Ville kjøpt, men budsjettet er fullt — {reason}"));
+                    st.log(format!("🤖 Autopilot: kjøp avvist lokalt (budsjett/kontanter) — {reason}"));
+                }
+            }
+            AutopilotDecision::Sell { amount_kr, reason } => {
+                let qty_onsket = amount_kr / price_nok;
+                // Nesten alt? Selg alt — unngå støvposisjoner.
+                let qty = if qty_onsket >= held_qty * 0.9 { held_qty } else { qty_onsket };
+                let qty = if crate::types::is_crypto(&ap.symbol) { qty } else { qty.floor() };
+                if qty > 0.0 && held_qty > 0.0 {
+                    trades_today += 1;
+                    st.manual_orders.push_back((ap.symbol.clone(), crate::types::Side::Sell, qty));
+                    let msg = format!("🤖 Autopilot: SELG {} for ca. {:.0} kr — {reason}", ap.symbol, qty * price_nok);
+                    st.autopilot_status = Some(format!("{klokke} {msg}"));
+                    st.log(msg.clone());
+                    st.toast(msg);
+                } else {
+                    st.autopilot_status =
+                        Some(format!("{klokke} Ville solgt, men eier ingenting — {reason}"));
+                    st.log(format!("🤖 Autopilot: salg avvist lokalt (ingen beholdning) — {reason}"));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autopilot_parses_clean_json() {
+        let d = parse_autopilot_decision(
+            r#"{"beslutning": "KJØP", "belop_kr": 500, "begrunnelse": "RSI oversolgt"}"#,
+        )
+        .unwrap();
+        assert_eq!(d, AutopilotDecision::Buy { amount_kr: 500.0, reason: "RSI oversolgt".into() });
+    }
+
+    #[test]
+    fn autopilot_parses_fenced_json_with_chatter() {
+        let text = "Her er min vurdering:\n```json\n{\"beslutning\": \"selg\", \"belop_kr\": -300, \"begrunnelse\": \"overkjøpt\"}\n```\nLykke til!";
+        let d = parse_autopilot_decision(text).unwrap();
+        assert_eq!(d, AutopilotDecision::Sell { amount_kr: 300.0, reason: "overkjøpt".into() });
+    }
+
+    #[test]
+    fn autopilot_defaults_to_hold() {
+        // AVVENT, ukjente beslutninger og null-beløp blir alle AVVENT.
+        let hold = parse_autopilot_decision(r#"{"beslutning": "AVVENT", "belop_kr": 0, "begrunnelse": "uklart"}"#).unwrap();
+        assert!(matches!(hold, AutopilotDecision::Hold { .. }));
+        let rar = parse_autopilot_decision(r#"{"beslutning": "DANS", "belop_kr": 100, "begrunnelse": "?"}"#).unwrap();
+        assert!(matches!(rar, AutopilotDecision::Hold { .. }));
+        let null = parse_autopilot_decision(r#"{"beslutning": "KJØP", "belop_kr": 0, "begrunnelse": "?"}"#).unwrap();
+        assert!(matches!(null, AutopilotDecision::Hold { .. }));
+        // Rent prat uten JSON er en feil.
+        assert!(parse_autopilot_decision("jeg vet ikke helt").is_err());
+    }
+}

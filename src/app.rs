@@ -127,6 +127,19 @@ pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path
         rt.spawn(engine::nordnet_task(cfg.clone(), state.clone(), flags.clone()));
     }
 
+    // 🤖 Morgan Autopilot: automatisk handel i ett symbol, lite budsjett.
+    if cfg.morgan.autopilot.enabled {
+        {
+            // Symbolet må være i watchlisten så motoren henter kurs for det.
+            let mut st = state.lock().unwrap();
+            let symbol = cfg.morgan.autopilot.symbol.clone();
+            if !st.watchlist.iter().any(|s| s == &symbol) {
+                st.watchlist.push(symbol);
+            }
+        }
+        rt.spawn(crate::morgan::autopilot_task(cfg.clone(), state.clone(), flags.clone()));
+    }
+
     // Referanseindeksen til «slår jeg børsen?»-grafen (stille ved feil).
     if !cfg.benchmark.is_empty() {
         let market_bm = market.clone();

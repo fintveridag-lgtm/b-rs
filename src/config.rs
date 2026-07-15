@@ -70,6 +70,8 @@ pub struct MorganCfg {
     /// Modellen Ollama skal bruke — må være hentet med `ollama pull <navn>`.
     #[serde(default = "default_ollama_model")]
     pub ollama_model: String,
+    #[serde(default)]
+    pub autopilot: AutopilotCfg,
 }
 
 impl Default for MorganCfg {
@@ -78,8 +80,54 @@ impl Default for MorganCfg {
             provider: default_morgan_provider(),
             ollama_url: default_ollama_url(),
             ollama_model: default_ollama_model(),
+            autopilot: AutopilotCfg::default(),
         }
     }
+}
+
+/// 🤖 Morgan Autopilot: la AI-en handle ett symbol automatisk innenfor et
+/// lite, hardt budsjett. Eksperimentelt — kjør i papirmodus.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct AutopilotCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Symbolet Morgan får handle (kun dette ene).
+    #[serde(default = "default_autopilot_symbol")]
+    pub symbol: String,
+    /// Hard grense: samlet beholdning i symbolet får aldri overstige dette.
+    #[serde(default = "default_autopilot_budget")]
+    pub budget_kr: f64,
+    /// Minutter mellom hver vurdering (minimum 15 håndheves).
+    #[serde(default = "default_autopilot_interval")]
+    pub interval_min: u64,
+    /// Maks antall handler per dag — resten blir AVVENT.
+    #[serde(default = "default_autopilot_max_trades")]
+    pub max_trades_per_day: u32,
+}
+
+impl Default for AutopilotCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            symbol: default_autopilot_symbol(),
+            budget_kr: default_autopilot_budget(),
+            interval_min: default_autopilot_interval(),
+            max_trades_per_day: default_autopilot_max_trades(),
+        }
+    }
+}
+
+fn default_autopilot_symbol() -> String {
+    "BTC-USD".to_string()
+}
+fn default_autopilot_budget() -> f64 {
+    1_000.0
+}
+fn default_autopilot_interval() -> u64 {
+    60
+}
+fn default_autopilot_max_trades() -> u32 {
+    4
 }
 
 fn default_morgan_provider() -> String {
