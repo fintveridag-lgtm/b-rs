@@ -6,3 +6,6 @@ backups/
 *.log
 *.log.old
 .env
+# Private nøkler (Revolut X m.m.) skal ALDRI til GitHub.
+*.pem
+*.key
