@@ -89,7 +89,9 @@ pub struct UiState {
     /// Toasts: (utløps-unixtid, melding) — små popup-kort i GUI-et.
     pub toasts: VecDeque<(i64, String)>,
     /// Aksjesøk: resultater og ventestatus.
-    pub search_results: Vec<(String, String)>,
+    /// Aksjesøk: (symbol, beskrivelse, kategori) — kategori er "Aksje",
+    /// "Fond/ETF", "Krypto" eller "Indeks".
+    pub search_results: Vec<(String, String, String)>,
     pub search_pending: bool,
     /// Ny versjon tilgjengelig: (versjon, nedlastingsside).
     pub update_available: Option<(String, String)>,

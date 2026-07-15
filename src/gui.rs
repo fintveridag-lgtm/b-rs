@@ -24,7 +24,11 @@ const GRAY: Color32 = Color32::from_rgb(140, 150, 165);
 const BG_PANEL: Color32 = Color32::from_rgb(4, 6, 10);
 const BG_DEEP: Color32 = Color32::from_rgb(1, 2, 4);
 const BG_CARD: Color32 = Color32::from_rgb(9, 12, 18);
+/// Lysere kort for innhold som må være lettlest (kontooversikten).
+const BG_CARD_LIGHT: Color32 = Color32::from_rgb(28, 34, 46);
 const BORDER: Color32 = Color32::from_rgb(22, 28, 38);
+/// Lys tekst på kortene — GRAY drukner mot den mørke bakgrunnen.
+const TEXT_LIGHT: Color32 = Color32::from_rgb(210, 218, 230);
 
 #[derive(Clone, Copy, PartialEq)]
 enum View {
@@ -152,6 +156,8 @@ pub fn run(deps: GuiDeps) -> Result<()> {
         order_filter: OrderFilter::Alle,
         alarm_level: 0.0,
         alarm_above: false,
+        market_search_filter: 0,
+        calendar_selected: None,
         limit_level: 0.0,
         savings_amount: 2_000.0,
         savings_day: 1,
@@ -294,6 +300,10 @@ struct App {
     order_filter: OrderFilter,
     alarm_level: f64,
     alarm_above: bool,
+    /// Kategorifilter i Markedet-søket: 0 alle, 1 aksjer, 2 fond, 3 krypto.
+    market_search_filter: u8,
+    /// Valgt hendelse i selskapskalenderen (indeks i st.calendar).
+    calendar_selected: Option<usize>,
     /// Nivåfeltet for nye limit-ordrer (0 = fylles med dagens kurs).
     limit_level: f64,
     /// Skjema for ny spareavtale: beløp og dag i måneden.
@@ -453,9 +463,9 @@ impl eframe::App for App {
             View::Ordrer => self.orders_view(ctx, &st),
             View::Transaksjoner => self.transactions_view(ctx, &mut st),
             View::Marked => self.market_view(ctx, &mut st),
-            View::Analyse => self.analyse_view(ctx, &st),
+            View::Analyse => self.analyse_view(ctx, &mut st),
             View::Morgan => self.morgan_view(ctx, &mut st),
-            View::Kalender => self.calendar_view(ctx, &st),
+            View::Kalender => self.calendar_view(ctx, &mut st),
             View::Innstillinger => self.settings_view(ctx, &mut st),
             View::Hjelp => self.help_view(ctx),
         }
@@ -621,9 +631,9 @@ impl App {
                     ui.spinner();
                 }
                 let mut follow_from_search: Option<String> = None;
-                for (symbol, name) in &st.search_results {
+                for (symbol, name, kategori) in &st.search_results {
                     if ui
-                        .button(RichText::new(format!("➕ {symbol} — {name}")).small())
+                        .button(RichText::new(format!("➕ {symbol} — {name} [{kategori}]")).small())
                         .clicked()
                     {
                         follow_from_search = Some(symbol.clone());
@@ -2356,12 +2366,13 @@ impl App {
         });
     }
 
-    fn calendar_view(&self, ctx: &egui::Context, st: &UiState) {
+    fn calendar_view(&mut self, ctx: &egui::Context, st: &mut UiState) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(4.0);
             ui.heading(RichText::new("📅 Selskapskalender").strong());
             ui.small(
                 "Kommende kvartalsrapporter og utbyttedatoer for de 25 største Oslo Børs-selskapene. \
+                 Klikk på en hendelse for å se hva den betyr og hvordan aksjen ligger an. \
                  Datoene er Yahoos estimater og kan endres av selskapene.",
             );
             ui.add_space(6.0);
@@ -2379,8 +2390,15 @@ impl App {
                     }
                     ui.end_row();
                     let now = chrono::Utc::now();
-                    for e in &st.calendar {
-                        ui.label(RichText::new(e.date.format("%d.%m.%Y").to_string()).strong());
+                    for (i, e) in st.calendar.iter().enumerate() {
+                        let valgt = self.calendar_selected == Some(i);
+                        if ui
+                            .selectable_label(valgt, RichText::new(e.date.format("%d.%m.%Y").to_string()).strong())
+                            .on_hover_text("Klikk for detaljer")
+                            .clicked()
+                        {
+                            self.calendar_selected = if valgt { None } else { Some(i) };
+                        }
                         let days = (e.date - now).num_days();
                         let om = match days {
                             d if d <= 0 => "i dag".to_string(),
@@ -2395,10 +2413,120 @@ impl App {
                             "Eks-utbytte" => YELLOW,
                             _ => GREEN,
                         };
-                        ui.label(RichText::new(e.kind).color(color).strong());
+                        if ui
+                            .selectable_label(valgt, RichText::new(e.kind).color(color).strong())
+                            .on_hover_text("Klikk for detaljer")
+                            .clicked()
+                        {
+                            self.calendar_selected = if valgt { None } else { Some(i) };
+                        }
                         ui.end_row();
                     }
                 });
+
+                // Detaljkort for valgt hendelse: hva skjer, og hvordan
+                // ligger aksjen an nå.
+                if let Some(i) = self.calendar_selected {
+                    if let Some(e) = st.calendar.get(i).cloned() {
+                        ui.add_space(10.0);
+                        egui::Frame::none()
+                            .fill(BG_CARD_LIGHT)
+                            .stroke(egui::Stroke::new(1.0, BORDER))
+                            .rounding(egui::Rounding::same(10.0))
+                            .shadow(card_shadow())
+                            .inner_margin(egui::Margin::same(14.0))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} — {} {}",
+                                        e.name,
+                                        e.kind,
+                                        e.date.format("%d.%m.%Y")
+                                    ))
+                                    .strong()
+                                    .size(16.0)
+                                    .color(Color32::WHITE),
+                                );
+                                ui.add_space(4.0);
+                                let forklaring = match e.kind {
+                                    "Kvartalsrapport" =>
+                                        "Selskapet legger frem resultatene for kvartalet: omsetning, resultat og \
+                                         gjerne utsikter fremover. Tallene slippes vanligvis før børsåpning (ca. 07–08), \
+                                         med webcast/presentasjon utover formiddagen — se selskapets investorsider (IR). \
+                                         Forvent større kursutslag enn normalt denne dagen: overraskelser i begge \
+                                         retninger straffes/belønnes raskt. Mange venter med å handle til etter fremleggelsen.",
+                                    "Eks-utbytte" =>
+                                        "Første dag aksjen handles UTEN rett til neste utbytte. Vil du ha utbyttet, \
+                                         må du eie aksjen SENEST dagen før denne datoen. Kursen faller normalt omtrent \
+                                         tilsvarende utbyttebeløpet på eks-dagen — det er ikke et «fall», bare utbyttet \
+                                         som skilles ut. Selve utbetalingen kommer typisk 1–2 uker senere.",
+                                    _ =>
+                                        "Utbyttet betales ut til alle som eide aksjen før eks-datoen. Pengene dukker \
+                                         opp på meglerkontoen i løpet av dagen eller de nærmeste dagene.",
+                                };
+                                ui.label(RichText::new(forklaring).color(TEXT_LIGHT));
+                                ui.add_space(6.0);
+
+                                // Aksjens status akkurat nå, fra appens egne data.
+                                let mut status: Vec<String> = Vec::new();
+                                if let Some(q) = st.quotes.get(&e.symbol) {
+                                    status.push(format!("Kurs nå: {:.2} ({:+.2} % i dag).", q.last, q.change_pct()));
+                                }
+                                if let Some(w) = st.market.week.iter().find(|w| w.symbol == e.symbol) {
+                                    status.push(format!(
+                                        "Uken: {:+.1} %, RSI {:.0}, trend {}.",
+                                        w.week_pct,
+                                        w.rsi,
+                                        if w.trend_up { "opp" } else { "ned" }
+                                    ));
+                                }
+                                if let Some(d) = st.dividends.get(&e.symbol) {
+                                    status.push(format!("Utbytte siste 12 mnd: {d:.2} per aksje."));
+                                }
+                                if let Some(p) = st.positions.iter().find(|p| p.symbol == e.symbol) {
+                                    status.push(format!(
+                                        "Du eier {} stk (urealisert {:+.0}).",
+                                        fmt_qty(p.qty),
+                                        p.unrealized()
+                                    ));
+                                }
+                                if !status.is_empty() {
+                                    ui.label(RichText::new(status.join(" ")).color(TEXT_LIGHT).small());
+                                    ui.add_space(6.0);
+                                }
+
+                                ui.horizontal(|ui| {
+                                    let fulgt = st.watchlist.iter().any(|s| s == &e.symbol);
+                                    if fulgt {
+                                        ui.label(RichText::new("✔ i watchlisten").color(GREEN).small());
+                                    } else if ui.button("➕ Følg aksjen").clicked() {
+                                        st.follow(&e.symbol);
+                                        self.sync_watchlist(&st.watchlist);
+                                    }
+                                    if ui
+                                        .add_enabled(!st.morgan_pending, egui::Button::new("🧠 Spør Morgan"))
+                                        .on_hover_text("Dypdykk i aksjen fra AI-analysesjefen")
+                                        .clicked()
+                                    {
+                                        let symbol = e.symbol.clone();
+                                        self.ask_morgan_about(&symbol, st);
+                                        self.view = View::Morgan;
+                                    }
+                                    if ui.button("🔗 Yahoo Finance").clicked() {
+                                        ctx.open_url(egui::OpenUrl::new_tab(format!(
+                                            "https://finance.yahoo.com/quote/{}",
+                                            e.symbol
+                                        )));
+                                    }
+                                    if ui.button("Lukk").clicked() {
+                                        self.calendar_selected = None;
+                                    }
+                                });
+                            });
+                    } else {
+                        self.calendar_selected = None;
+                    }
+                }
             });
         });
     }
@@ -2681,6 +2809,80 @@ impl App {
                 ui.small("Klikk ➕ for å legge en aksje i watchlisten — da følger boten og grafen den.");
                 ui.add_space(8.0);
 
+                // 🔍 Søk i hele markedet: aksjer, fond/ETF-er og krypto.
+                section_heading(ui, "🔍 Søk i markedet");
+                ui.horizontal(|ui| {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.search_query)
+                            .hint_text("Navn eller ticker: «kongsberg», «S&P 500», «bitcoin» …")
+                            .desired_width(300.0),
+                    );
+                    let go = ui.button("Søk").clicked()
+                        || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    if go && !self.search_query.trim().is_empty() {
+                        st.search_pending = true;
+                        st.search_results.clear();
+                        let market = self.market.clone();
+                        let state = self.state.clone();
+                        let query = self.search_query.trim().to_string();
+                        self.rt.spawn(async move {
+                            let results = market.search(&query).await.unwrap_or_default();
+                            let mut st = state.lock().unwrap();
+                            st.search_pending = false;
+                            if results.is_empty() {
+                                st.log(format!("Søket «{query}» ga ingen treff."));
+                            }
+                            st.search_results = results;
+                        });
+                    }
+                    ui.separator();
+                    for (i, label) in [(0u8, "Alle"), (1, "📈 Aksjer"), (2, "🌍 Fond/ETF"), (3, "₿ Krypto")] {
+                        if ui.selectable_label(self.market_search_filter == i, label).clicked() {
+                            self.market_search_filter = i;
+                        }
+                    }
+                    if st.search_pending {
+                        ui.spinner();
+                    }
+                });
+                if !st.search_results.is_empty() {
+                    let filter_ok = |kategori: &str| match self.market_search_filter {
+                        1 => kategori == "Aksje",
+                        2 => kategori == "Fond/ETF",
+                        3 => kategori == "Krypto",
+                        _ => true,
+                    };
+                    let mut vist = 0;
+                    egui::Grid::new("markedssok").striped(true).min_col_width(70.0).show(ui, |ui| {
+                        for (symbol, name, kategori) in &st.search_results {
+                            if !filter_ok(kategori) {
+                                continue;
+                            }
+                            vist += 1;
+                            let allerede = st.watchlist.iter().any(|s| s == symbol);
+                            if allerede {
+                                ui.label(RichText::new("✔ følges").color(GREEN).small());
+                            } else if ui.button(RichText::new("➕ Følg").small()).clicked() {
+                                to_follow.push(symbol.clone());
+                            }
+                            ui.label(RichText::new(symbol).strong());
+                            ui.label(name);
+                            let farge = match kategori.as_str() {
+                                "Aksje" => GREEN,
+                                "Fond/ETF" => BLUE,
+                                "Krypto" => YELLOW,
+                                _ => GRAY,
+                            };
+                            ui.label(RichText::new(kategori).color(farge).small());
+                            ui.end_row();
+                        }
+                    });
+                    if vist == 0 {
+                        ui.small("Ingen treff i denne kategorien — prøv «Alle».");
+                    }
+                }
+                ui.add_space(14.0);
+
                 market_table(
                     ui,
                     "💰 Dagens mest omsatte",
@@ -2717,7 +2919,7 @@ impl App {
         });
     }
 
-    fn analyse_view(&self, ctx: &egui::Context, st: &UiState) {
+    fn analyse_view(&mut self, ctx: &egui::Context, st: &mut UiState) {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().id_salt("analyse_scroll").show(ui, |ui| {
                 ui.add_space(4.0);
@@ -2735,16 +2937,27 @@ impl App {
                 });
                 ui.small(
                     "Automatisk teknisk vurdering av uken som kommer, per aksje: trend (SMA 5/20), \
-                     momentum (ukesendring) og RSI. Dette er en enkel maskinvurdering — IKKE investeringsråd.",
+                     momentum (ukesendring) og RSI. Klikk ➕ for å legge aksjen i watchlisten. \
+                     Dette er en enkel maskinvurdering — IKKE investeringsråd.",
                 );
                 ui.add_space(8.0);
 
+                let mut to_follow: Vec<String> = Vec::new();
                 egui::Grid::new("ukesanalyse").striped(true).min_col_width(60.0).show(ui, |ui| {
-                    for h in ["Symbol", "Selskap", "Siste", "Uke", "RSI", "Trend", "Sving/dag", "Vurdering"] {
+                    for h in ["", "Symbol", "Selskap", "Siste", "Uke", "RSI", "Trend", "Sving/dag", "Vurdering"] {
                         ui.label(RichText::new(h).strong().color(GRAY));
                     }
                     ui.end_row();
                     for w in &st.market.week {
+                        if st.watchlist.iter().any(|s| s == &w.symbol) {
+                            ui.label(RichText::new("✔").color(GREEN).small());
+                        } else if ui
+                            .small_button("➕")
+                            .on_hover_text("Legg i watchlisten — da følger boten og grafen den")
+                            .clicked()
+                        {
+                            to_follow.push(w.symbol.clone());
+                        }
                         ui.label(RichText::new(&w.symbol).strong());
                         ui.label(&w.name);
                         ui.label(format!("{:.2}", w.last));
@@ -2766,6 +2979,12 @@ impl App {
                 if st.market.week.is_empty() {
                     ui.add_space(10.0);
                     ui.spinner();
+                }
+                if !to_follow.is_empty() {
+                    for symbol in to_follow {
+                        st.follow(&symbol);
+                    }
+                    self.sync_watchlist(&st.watchlist);
                 }
             });
         });
@@ -3049,22 +3268,25 @@ fn updown(v: f64) -> Color32 {
 /// Kontokort med tittel og rader av (etikett, verdi, farge).
 fn account_card(ui: &mut egui::Ui, title: &str, rows: &[(&str, String, Color32)]) {
     egui::Frame::group(ui.style())
-        .fill(BG_CARD)
+        // Lysere enn de andre kortene — teksten her skal være lett å lese.
+        .fill(BG_CARD_LIGHT)
         .stroke(egui::Stroke::new(1.0, BORDER))
         .rounding(egui::Rounding::same(12.0))
         .shadow(card_shadow())
         .inner_margin(egui::Margin::symmetric(16.0, 12.0))
         .show(ui, |ui| {
             ui.vertical(|ui| {
-                ui.label(RichText::new(title).strong().size(15.0));
+                ui.label(RichText::new(title).strong().size(15.0).color(Color32::WHITE));
                 ui.add_space(4.0);
                 for (label, value, color) in rows {
                     ui.horizontal(|ui| {
                         if !label.is_empty() {
-                            ui.label(RichText::new(*label).small().color(GRAY));
+                            ui.label(RichText::new(*label).small().color(TEXT_LIGHT));
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(value).color(*color).strong());
+                            // GRAY drukner på kortet — løft til lys tekst.
+                            let farge = if *color == GRAY { TEXT_LIGHT } else { *color };
+                            ui.label(RichText::new(value).color(farge).strong());
                         });
                     });
                 }
