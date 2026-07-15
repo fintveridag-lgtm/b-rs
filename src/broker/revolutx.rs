@@ -346,8 +346,12 @@ mod tests {
         assert!(pem.contains("BEGIN PRIVATE KEY"));
         let key = SigningKey::from_pkcs8_pem(&pem).unwrap();
         use ed25519_dalek::pkcs8::EncodePublicKey;
+        // Sammenlign med samme normalisering som generate_keypair bruker.
         let roundtrip: String = key.verifying_key().to_public_key_pem(Default::default()).unwrap();
-        assert_eq!(roundtrip, public);
+        assert_eq!(roundtrip.replace("\r\n", "\n").trim_end(), public);
+        // Og ingen Windows-linjeskift i det som vises til brukeren.
+        assert!(!public.contains('\r'));
+        assert!(!pem.contains('\r'));
         // Aldri overskriv en eksisterende nøkkel.
         assert!(generate_keypair(&path).is_err());
 
