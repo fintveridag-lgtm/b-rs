@@ -3468,7 +3468,8 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
         "🚀 Kom i gang",
         "Appen starter alltid i PAPIR-modus: boten handler med lekepenger og ekte kurser, helt risikofritt. \
          Følg med noen dager, kjør backtester, og juster innstillingene før du i det hele tatt vurderer live-handel. \
-         Kursene kommer fra Yahoo Finance og er ca. 15 minutter forsinket — Oslo Børs er åpen 09:00–16:30.",
+         Aksjekurser kommer fra Yahoo Finance (ca. 15 min forsinket — Oslo Børs er åpen 09:00–16:30). \
+         Kryptokurser hentes i SANNTID fra Kraken-børsen, døgnet rundt, med Yahoo som reserve.",
     ),
     (
         "🧠 Strategiene",

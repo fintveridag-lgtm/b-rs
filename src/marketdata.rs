@@ -63,8 +63,25 @@ impl Yahoo {
     }
 
     pub async fn quote(&self, symbol: &str) -> Result<Quote> {
+        // Krypto: hent ekte sanntidskurs fra Kraken (gratis, uten nøkkel).
+        // Feiler det (ukjent par, nede), faller vi stille tilbake til Yahoo.
+        if crate::types::is_crypto(symbol) {
+            if let Ok(q) = self.kraken_quote(symbol).await {
+                return Ok(q);
+            }
+        }
         let result = self.chart(symbol, "1d", "5m").await?;
         parse_quote(symbol, &result)
+    }
+
+    /// Sanntidskurs fra Krakens åpne ticker-API. "BTC-USD" → paret "XBTUSD"
+    /// (Kraken kaller Bitcoin XBT); andre par brukes som de er uten bindestrek.
+    async fn kraken_quote(&self, symbol: &str) -> Result<Quote> {
+        let (base, quote_cur) = symbol.split_once('-').context("ikke et kryptopar")?;
+        let pair = format!("{}{}", if base == "BTC" { "XBT" } else { base }, quote_cur);
+        let url = format!("https://api.kraken.com/0/public/Ticker?pair={pair}");
+        let v = self.get_json(&url).await?;
+        parse_kraken_quote(symbol, quote_cur, &v)
     }
 
     /// Daglige OHLC-stolper, eldst først. Brukes til å så strategien ved
@@ -180,6 +197,37 @@ fn parse_dividends(result: &Value) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Tolk Krakens ticker-svar: "c" = [siste kurs, volum], "o" = dagens
+/// åpningskurs (brukes som referanse for dagsendringen — krypto handles
+/// døgnet rundt, så «forrige slutt» er uansett et valg).
+fn parse_kraken_quote(symbol: &str, quote_cur: &str, v: &Value) -> Result<Quote> {
+    let errors = v.get("error").and_then(Value::as_array).cloned().unwrap_or_default();
+    anyhow::ensure!(errors.is_empty(), "Kraken: {errors:?}");
+    let result = v
+        .get("result")
+        .and_then(Value::as_object)
+        .context("uventet svar fra Kraken")?;
+    let (_, t) = result.iter().next().context("tomt svar fra Kraken")?;
+    let last: f64 = t
+        .pointer("/c/0")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse().ok())
+        .with_context(|| format!("mangler siste kurs for {symbol}"))?;
+    anyhow::ensure!(last > 0.0, "ugyldig kurs for {symbol}");
+    let open: f64 = t
+        .get("o")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(last);
+    Ok(Quote {
+        symbol: symbol.to_string(),
+        last,
+        prev_close: open,
+        currency: quote_cur.to_string(),
+        ts: chrono::Utc::now(),
+    })
+}
+
 fn parse_quote(symbol: &str, result: &Value) -> Result<Quote> {
     let meta = result
         .pointer("/meta")
@@ -267,6 +315,36 @@ fn parse_history(symbol: &str, result: &Value) -> Result<Vec<Candle>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn parses_kraken_ticker() {
+        let v = json!({
+            "error": [],
+            "result": {
+                "XXBTZUSD": {
+                    "c": ["60123.4", "0.012"],
+                    "o": "59800.0",
+                    "h": ["60500.0", "60500.0"],
+                }
+            }
+        });
+        let q = parse_kraken_quote("BTC-USD", "USD", &v).unwrap();
+        assert_eq!(q.symbol, "BTC-USD");
+        assert_eq!(q.last, 60123.4);
+        assert_eq!(q.prev_close, 59800.0);
+        assert_eq!(q.currency, "USD");
+        // Dagsendring mot åpning: (60123.4/59800 − 1) ≈ +0,54 %.
+        assert!((q.change_pct() - 0.5408).abs() < 0.01);
+    }
+
+    #[test]
+    fn kraken_errors_are_errors() {
+        let v = json!({"error": ["EQuery:Unknown asset pair"], "result": {}});
+        assert!(parse_kraken_quote("TULL-USD", "USD", &v).is_err());
+        // Kurs på 0 skal aldri slippe gjennom.
+        let v = json!({"error": [], "result": {"X": {"c": ["0.0", "1"]}}});
+        assert!(parse_kraken_quote("BTC-USD", "USD", &v).is_err());
+    }
 
     #[test]
     fn parses_quote_from_chart_result() {
