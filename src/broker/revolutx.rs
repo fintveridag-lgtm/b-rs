@@ -49,9 +49,13 @@ fn map_state(state: &str) -> OrderStatus {
 }
 
 fn as_f64_str(v: &Value, key: &str) -> f64 {
-    v.get(key)
-        .and_then(Value::as_str)
-        .and_then(|s| s.parse().ok())
+    v.get(key).map(f64_any).unwrap_or(0.0)
+}
+
+/// Tall uansett om API-et sender `12.5` eller `"12.5"`.
+fn f64_any(v: &Value) -> f64 {
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
         .unwrap_or(0.0)
 }
 
@@ -87,11 +91,52 @@ impl RevolutXBroker {
     }
 
     /// Verifiser nøklene ved oppstart med et harmløst kall.
-    pub async fn check_session(&self) -> Result<()> {
-        self.request(reqwest::Method::GET, "/balances", "", None)
+    /// Test nøklene og returner en lesbar saldo-oppsummering til loggen —
+    /// gull verdt ved feilsøking («hvorfor står det 0 i kontanter?»).
+    pub async fn check_session(&self) -> Result<String> {
+        let balances = self
+            .balances()
             .await
             .context("Revolut X avviste API-nøklene — sjekk REVOLUTX_API_KEY og privatnøkkelen")?;
-        Ok(())
+        if balances.is_empty() {
+            return Ok("Revolut X: ingen saldoer på børskontoen ennå — sett inn penger i Revolut X (adskilt fra vanlige Revolut).".into());
+        }
+        let liste = balances
+            .iter()
+            .map(|(c, v)| format!("{c} {v:.2}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!("Revolut X-saldoer: {liste}. Appen bruker {}-saldoen som kontanter.", self.quote))
+    }
+
+    /// Alle saldoer som (valuta, tilgjengelig beløp). Tåler at svaret er
+    /// pakket i et data-felt og at beløp/valuta har ulike feltnavn.
+    async fn balances(&self) -> Result<Vec<(String, f64)>> {
+        let v = self.request(reqwest::Method::GET, "/balances", "", None).await?;
+        let list = v
+            .pointer("/data")
+            .or_else(|| v.pointer("/balances"))
+            .unwrap_or(&v)
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for b in list {
+            let currency = ["currency", "asset", "ccy", "symbol"]
+                .iter()
+                .find_map(|k| b.get(*k).and_then(Value::as_str))
+                .unwrap_or("")
+                .to_string();
+            if currency.is_empty() {
+                continue;
+            }
+            let available = ["available", "available_balance", "balance", "amount", "total"]
+                .iter()
+                .find_map(|k| b.get(*k).map(f64_any))
+                .unwrap_or(0.0);
+            out.push((currency, available));
+        }
+        Ok(out)
     }
 
     async fn request(
@@ -254,13 +299,12 @@ impl Broker for RevolutXBroker {
     }
 
     async fn cash(&self) -> Result<f64> {
-        let v = self.request(reqwest::Method::GET, "/balances", "", None).await?;
-        for b in v.as_array().cloned().unwrap_or_default() {
-            if b.get("currency").and_then(Value::as_str) == Some(self.quote.as_str()) {
-                return Ok(as_f64_str(&b, "available"));
-            }
-        }
-        Ok(0.0)
+        let balances = self.balances().await?;
+        Ok(balances
+            .iter()
+            .find(|(c, _)| c == &self.quote)
+            .map(|&(_, v)| v)
+            .unwrap_or(0.0))
     }
 }
 

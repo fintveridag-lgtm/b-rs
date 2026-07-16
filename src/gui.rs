@@ -550,11 +550,12 @@ impl App {
             // Nøkkeltall-kort
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                stat_card(ui, "Kontanter", format!("{} kr", fmt_thousands(st.cash)), Color32::WHITE);
-                stat_card(ui, "Egenkapital", format!("{} kr", fmt_thousands(st.equity)), Color32::WHITE);
+                let cur = &st.cash_currency;
+                stat_card(ui, "Kontanter", format!("{} {cur}", fmt_thousands(st.cash)), Color32::WHITE);
+                stat_card(ui, "Egenkapital", format!("{} {cur}", fmt_thousands(st.equity)), Color32::WHITE);
                 let pnl_color = if st.drawdown >= 0.0 { GREEN } else { RED };
                 let sign = if st.drawdown >= 0.0 { "+" } else { "" };
-                stat_card(ui, "P&L siden start", format!("{sign}{} kr", fmt_thousands(st.drawdown)), pnl_color);
+                stat_card(ui, "P&L siden start", format!("{sign}{} {cur}", fmt_thousands(st.drawdown)), pnl_color);
                 stat_card(ui, "Posisjoner", format!("{}", st.positions.len()), BLUE);
                 let status = if self.flags.killed() {
                     ("STOPPET", RED)
@@ -1979,11 +1980,17 @@ impl App {
                 // Kontooversikt
                 section_heading(ui, "🏦 Kontoer");
                 ui.horizontal(|ui| {
-                    account_card(ui, &format!("Papirkonto ({})", st.broker_name), &[
-                        ("Egenkapital", format!("{} kr", fmt_thousands(st.equity)), Color32::WHITE),
-                        ("Kontanter", format!("{} kr", fmt_thousands(st.cash)), GRAY),
-                        ("I dag", format!("{}{} kr ({:+.2} %)", plus(day_kr), fmt_thousands(day_kr), day_pct), updown(day_kr)),
-                        ("Total avkastning", format!("{}{} kr ({:+.2} %)", plus(total_kr), fmt_thousands(total_kr), total_pct), updown(total_kr)),
+                    let cur = st.cash_currency.clone();
+                    let kontotittel = if st.mode == "live" {
+                        format!("Konto hos {}", st.broker_name)
+                    } else {
+                        format!("Papirkonto ({})", st.broker_name)
+                    };
+                    account_card(ui, &kontotittel, &[
+                        ("Egenkapital", format!("{} {cur}", fmt_thousands(st.equity)), Color32::WHITE),
+                        ("Kontanter", format!("{} {cur}", fmt_thousands(st.cash)), GRAY),
+                        ("I dag", format!("{}{} {cur} ({:+.2} %)", plus(day_kr), fmt_thousands(day_kr), day_pct), updown(day_kr)),
+                        ("Total avkastning", format!("{}{} {cur} ({:+.2} %)", plus(total_kr), fmt_thousands(total_kr), total_pct), updown(total_kr)),
                     ]);
                     if st.nordnet_enabled {
                         let nn_value: f64 = st.nordnet_positions.iter().map(|p| p.market_value).sum();

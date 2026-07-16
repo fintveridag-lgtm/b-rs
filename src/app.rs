@@ -31,6 +31,8 @@ pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path
 
     let store = Arc::new(store::Store::open(&cfg.db_path)?);
 
+    // Saldo-oppsummering fra megleren ved oppstart — logges når UI-et finnes.
+    let mut broker_summary: Option<String> = None;
     let broker: Arc<dyn Broker> = match (cfg.is_live(), cfg.broker.as_str()) {
         (false, _) | (true, "paper") => Arc::new(broker::paper::PaperBroker::new(
             cfg.starting_cash,
@@ -46,7 +48,7 @@ pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path
         (true, "revolutx") => {
             let rx_cfg = cfg.revolutx.as_ref().context("[revolutx]-seksjon mangler i konfig")?;
             let b = broker::revolutx::RevolutXBroker::new(rx_cfg)?;
-            rt.block_on(b.check_session())?;
+            broker_summary = Some(rt.block_on(b.check_session())?);
             Arc::new(b)
         }
         (true, other) => anyhow::bail!("ukjent megler: {other}"),
@@ -86,6 +88,15 @@ pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path
         }
         if let Some(msg) = backup_msg {
             st.log(msg);
+        }
+        if let Some(msg) = broker_summary {
+            st.log(msg);
+        }
+        // Kontanter/egenkapital vises i meglerens valuta — USD hos Revolut X.
+        if cfg.is_live() && cfg.broker == "revolutx" {
+            if let Some(rx) = &cfg.revolutx {
+                st.cash_currency = rx.quote_currency.clone();
+            }
         }
         // Fortell brukeren om papirporteføljen ble gjenopprettet.
         if !cfg.is_live() || cfg.broker == "paper" {

@@ -49,6 +49,8 @@ pub struct Engine {
     last_equity_write: Option<std::time::Instant>,
     /// (dato, symbol)-par som alt har fått dagsfall-varsel — én gang per dag.
     day_move_alerted: HashSet<(String, String)>,
+    /// Kontantsaldo-feil er logget (nullstilles når kallet lykkes igjen).
+    cash_error_logged: bool,
 }
 
 impl Engine {
@@ -90,6 +92,7 @@ impl Engine {
             fail_streak: 0,
             last_equity_write: None,
             day_move_alerted: HashSet::new(),
+            cash_error_logged: false,
         })
     }
 
@@ -379,7 +382,20 @@ impl Engine {
                 Vec::new()
             }
         };
-        let cash = self.broker.cash().await.unwrap_or(0.0);
+        let cash = match self.broker.cash().await {
+            Ok(c) => {
+                self.cash_error_logged = false;
+                c
+            }
+            Err(e) => {
+                // Si fra ÉN gang — en stille 0 i kontanter er umulig å feilsøke.
+                if !self.cash_error_logged {
+                    self.cash_error_logged = true;
+                    self.log(format!("Klarte ikke hente kontantsaldo fra megleren: {e:#}"));
+                }
+                0.0
+            }
+        };
         let equity = cash + positions.iter().map(|p| p.market_value()).sum::<f64>();
         self.risk.observe_equity(equity);
 

@@ -111,6 +111,9 @@ pub struct UiState {
     pub morgan_archive: Vec<(i64, String, String)>,
     /// 🤖 Autopilotens siste beslutning, klar for visning i GUI-et.
     pub autopilot_status: Option<String>,
+    /// Valutaen kontanter/egenkapital vises i: "kr" (papir) eller
+    /// meglerens kontovaluta ("USD" hos Revolut X).
+    pub cash_currency: String,
     /// Daglig egenkapital over tid (unixtid, verdi) — varig historikk.
     pub equity_daily: Vec<(f64, f64)>,
     /// Referanseindeksen (unixtid, kurs) til «slår jeg børsen?»-grafen.
@@ -226,6 +229,7 @@ impl UiState {
             news_pending: false,
             morgan_archive: Vec::new(),
             autopilot_status: None,
+            cash_currency: "kr".to_string(),
             equity_daily: Vec::new(),
             benchmark: Vec::new(),
             benchmark_name: String::new(),
