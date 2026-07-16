@@ -258,6 +258,12 @@ pub struct StrategyCfg {
     /// Antall aksjer per kjøpsordre (brukes bare når order_value = 0).
     #[serde(default = "default_order_qty")]
     pub order_qty: f64,
+    /// Tidsramme i minutter for strategisignalene: tikkene samles i jevne
+    /// lys, og strategien ser bare sluttkursen per lys. 0 = hvert tikk
+    /// (rå, rask). F.eks. 5 = klassisk intradag, 60 = timelys.
+    /// Vinduene (fast/slow) teller da lys av denne lengden.
+    #[serde(default)]
+    pub timeframe_min: u64,
     /// RSI-strategien: periode og terskler.
     #[serde(default = "default_rsi_period")]
     pub rsi_period: usize,
@@ -278,6 +284,7 @@ impl Default for StrategyCfg {
             fast: default_fast(),
             slow: default_slow(),
             order_qty: default_order_qty(),
+            timeframe_min: 0,
             rsi_period: default_rsi_period(),
             rsi_buy_below: default_rsi_buy_below(),
             rsi_sell_above: default_rsi_sell_above(),

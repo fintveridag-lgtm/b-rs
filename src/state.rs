@@ -52,6 +52,9 @@ pub struct UiState {
     pub sma_windows: (usize, usize),
     /// Daglige OHLC-stolper per symbol — candlestick-graf og backtesting.
     pub candles: BTreeMap<String, Vec<Candle>>,
+    /// Intradag-lys (5 min, ~60 dager) per symbol — seeding og backtesting
+    /// når strategien kjører med tidsramme (timeframe_min > 0).
+    pub candles_intraday: BTreeMap<String, Vec<Candle>>,
     /// Strategien engine kjører akkurat nå.
     pub strategy_name: String,
     /// Settes av GUI-et når brukeren vil bytte strategi; engine plukker den opp.
@@ -202,6 +205,7 @@ impl UiState {
             manual_orders: VecDeque::new(),
             sma_windows: (5, 20),
             candles: BTreeMap::new(),
+            candles_intraday: BTreeMap::new(),
             strategy_name: String::new(),
             strategy_request: None,
             strategy_cfg: StrategyCfg::default(),

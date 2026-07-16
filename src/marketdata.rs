@@ -91,6 +91,14 @@ impl Yahoo {
         parse_history(symbol, &result)
     }
 
+    /// Intradag-historikk: 5-minutterslys for de siste ~60 dagene (Yahoos
+    /// maksgrense for 5m-oppløsning). Brukes til seeding og backtesting
+    /// når strategien kjører med tidsramme.
+    pub async fn history_intraday(&self, symbol: &str) -> Result<Vec<Candle>> {
+        let result = self.chart(symbol, "60d", "5m").await?;
+        parse_history(symbol, &result)
+    }
+
     /// Søk etter aksjer/fond/krypto med fritekst («kongsberg») — returnerer
     /// (symbol, beskrivelse, kategori) der kategorien er norsk og klar for
     /// filtrering: "Aksje", "Fond/ETF", "Krypto" eller "Indeks".

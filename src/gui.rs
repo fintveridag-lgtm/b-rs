@@ -2632,6 +2632,15 @@ impl App {
                     ui.label("Antall per ordre (når beløp = 0)");
                     ui.add(egui::DragValue::new(&mut s.strategy.order_qty).range(1.0..=1_000_000.0));
                     ui.end_row();
+                    ui.label("Tidsramme (minutter; 0 = hvert tikk)")
+                        .on_hover_text(
+                            "Samler kursene i jevne lys før strategien ser dem: 5 = intradag på \
+                             5-minutterslys, 60 = timelys, 0 = reager på hvert tikk (rått og raskt). \
+                             Vinduene under teller lys av denne lengden. Backtesten bruker samme \
+                             oppløsning (intradag: siste ~60 dager).",
+                        );
+                    ui.add(egui::DragValue::new(&mut s.strategy.timeframe_min).range(0..=240));
+                    ui.end_row();
                     ui.label("SMA rask / treg");
                     ui.horizontal(|ui| {
                         ui.add(egui::DragValue::new(&mut s.strategy.fast).range(2..=100));
@@ -3478,7 +3487,12 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
          momentum: kjøper når kursen bryter over det høyeste på 20 dager, selger ved brudd under det laveste — følger utbrudd.\n\
          macd: kjøper når MACD-linjen (12/26) krysser over signallinjen (9), selger ved kryss under — fanger trendskifter.\n\
          bollinger: kjøper når kursen faller under nedre bånd (snitt −2 standardavvik = uvanlig billig mot seg selv), selger over øvre bånd.\n\n\
-         Bytt strategi i Strategi-panelet, overstyr per aksje, og test alltid med 🧪 Backtest eller ⚖ Sammenlign først.",
+         Bytt strategi i Strategi-panelet, overstyr per aksje, og test alltid med 🧪 Backtest eller ⚖ Sammenlign først.\n\n\
+         TIDSRAMME (Innstillinger → Strategi): med f.eks. 5 samles kursene i 5-minutterslys, og strategien \
+         ser bare sluttkursen per lys — bevisst daytrading der vinduene betyr det samme live som i backtest \
+         (som da tester på intradag-lys, siste ~60 dager). 0 = reager på hvert tikk (15 s) — raskt og støyete. \
+         Husk: mange handler per dag koster spread + gebyr per runde — daytrading krever høy treffsikkerhet bare \
+         for å gå i null.",
     ),
     (
         "⚡ Kjøp og salg",
@@ -3648,8 +3662,16 @@ fn run_backtest(
     let Some(symbol) = selected else {
         return Err("Velg et symbol i watchlisten først.".into());
     };
-    let Some(candles) = st.candles.get(symbol) else {
-        return Err("Ingen historikk ennå — vent til kursene er lastet.".into());
+    // Med tidsramme testes strategien på intradag-lys (5 min, ~60 dager) —
+    // samme oppløsning som den handler på live. Ellers dagslys over 2 år.
+    let candles = if st.strategy_cfg.timeframe_min > 0 {
+        st.candles_intraday
+            .get(symbol)
+            .ok_or("Ingen intradag-historikk ennå — vent litt (hentes ved oppstart), eller sjekk at tidsrammen ble lagret og appen restartet.")?
+    } else {
+        st.candles
+            .get(symbol)
+            .ok_or("Ingen historikk ennå — vent til kursene er lastet.")?
     };
     backtest::run(symbol, candles, strategy_name, &st.strategy_cfg, &st.backtest_cfg)
         .map_err(|e| format!("{e:#}"))

@@ -36,8 +36,12 @@ db_path = "b-rs.db"
 
 [strategy]
 # Strategier: "sma_cross" (SMA-krysning), "rsi" (oversolgt/overkjøpt),
-# "momentum" (brudd på høyeste/laveste). Kan også byttes inne i appen.
+# "momentum" (brudd), "macd", "bollinger". Kan også byttes inne i appen.
 name = "sma_cross"
+# Tidsramme i minutter: kursene samles i jevne lys før strategien ser dem.
+# 5 = intradag på 5-minutterslys, 60 = timelys, 0 = reager på hvert tikk.
+# Vinduene (fast/slow) teller lys av denne lengden. 0 er standard.
+timeframe_min = 0
 fast = 5             # sma_cross: rask SMA
 slow = 20            # sma_cross: treg SMA
 order_value = 10000.0 # kjøp for fast beløp (kr) per ordre — jevn risiko per posisjon

@@ -51,6 +51,22 @@ pub struct Engine {
     day_move_alerted: HashSet<(String, String)>,
     /// Kontantsaldo-feil er logget (nullstilles når kallet lykkes igjen).
     cash_error_logged: bool,
+    /// Tidsramme-lys per symbol: (lys-id, siste kurs i lyset). Strategien
+    /// ser bare sluttkursen når et lys lukkes (timeframe_min > 0).
+    tf_buckets: HashMap<String, (i64, f64)>,
+}
+
+/// Rull tidsramme-lyset for et symbol: oppdater innholdet og gi eventuelt
+/// sluttkursen for lyset som nettopp ble lukket.
+fn roll_bucket(prev: Option<(i64, f64)>, bucket: i64, price: f64) -> ((i64, f64), Option<f64>) {
+    match prev {
+        // Første observasjon — start lyset, ingenting å lukke.
+        None => ((bucket, price), None),
+        // Samme lys — oppdater sluttkursen.
+        Some((b, _)) if b == bucket => ((bucket, price), None),
+        // Nytt lys — lukk det forrige og lever sluttkursen til strategien.
+        Some((_, close)) => ((bucket, price), Some(close)),
+    }
 }
 
 impl Engine {
@@ -93,6 +109,7 @@ impl Engine {
             last_equity_write: None,
             day_move_alerted: HashSet::new(),
             cash_error_logged: false,
+            tf_buckets: HashMap::new(),
         })
     }
 
@@ -179,6 +196,22 @@ impl Engine {
                         st.candles.insert(symbol.clone(), bars.clone());
                     }
                     self.log(format!("{symbol}: sådd med {} dagers historikk", bars.len()));
+                    // Tidsramme-strategi trenger intradag-lys til seeding
+                    // og backtest — hent dem samtidig.
+                    if self.cfg.strategy.timeframe_min > 0 {
+                        match self.market.history_intraday(&symbol).await {
+                            Ok(intra) if !intra.is_empty() => {
+                                self.log(format!(
+                                    "{symbol}: {} intradag-lys (5 min) til tidsramme-strategien",
+                                    intra.len()
+                                ));
+                                self.state.lock().unwrap().candles_intraday.insert(symbol.clone(), intra);
+                            }
+                            _ => self.log(format!(
+                                "{symbol}: fikk ikke intradag-historikk — strategien varmes opp av live-lys i stedet"
+                            )),
+                        }
+                    }
                     // Utbytte siste 12 mnd — vises i porteføljeanalysen.
                     if let Ok(div) = self.market.dividends_12m(&symbol).await {
                         if div > 0.0 {
@@ -284,14 +317,21 @@ impl Engine {
         }
         let key = (name.clone(), symbol.to_string());
         if !self.strategy_seeded.contains(&key) {
-            let closes: Vec<f64> = self
-                .state
-                .lock()
-                .unwrap()
-                .history
-                .get(symbol)
-                .map(|h| h.iter().map(|&(_, p)| p).collect())
-                .unwrap_or_default();
+            // Så med samme oppløsning som strategien handler på: intradag-lys
+            // når tidsramme er valgt, ellers dagshistorikken.
+            let st = self.state.lock().unwrap();
+            let closes: Vec<f64> = if self.cfg.strategy.timeframe_min > 0 {
+                st.candles_intraday
+                    .get(symbol)
+                    .map(|c| c.iter().map(|b| b.close).collect())
+                    .unwrap_or_default()
+            } else {
+                st.history
+                    .get(symbol)
+                    .map(|h| h.iter().map(|&(_, p)| p).collect())
+                    .unwrap_or_default()
+            };
+            drop(st);
             if let Some(s) = self.strategies.get_mut(&name) {
                 s.seed(symbol, &closes);
             }
@@ -299,6 +339,22 @@ impl Engine {
         }
         let side = self.strategies.get_mut(&name)?.on_price(symbol, price)?;
         Some((side, name))
+    }
+
+    /// Signal per tikk — men med tidsramme (timeframe_min > 0) samles
+    /// tikkene i jevne lys, og strategien ser bare sluttkursen per lys.
+    /// Da betyr vinduene (fast/slow) det samme live som i backtest.
+    fn signal_on_tick(&mut self, symbol: &str, price: f64) -> Option<(Side, String)> {
+        let n = self.cfg.strategy.timeframe_min;
+        if n == 0 {
+            return self.signal_for(symbol, price);
+        }
+        let bucket = Utc::now().timestamp() / (n as i64 * 60);
+        let prev = self.tf_buckets.get(symbol).copied();
+        let (entry, closed) = roll_bucket(prev, bucket, price);
+        self.tf_buckets.insert(symbol.to_string(), entry);
+        let close = closed?;
+        self.signal_for(symbol, close)
     }
 
     async fn tick(&mut self) {
@@ -513,7 +569,7 @@ impl Engine {
                 }
                 // Strategien regner i instrumentets valuta; ordrer og
                 // risiko i kontovaluta.
-                let Some((side, strat_name)) = self.signal_for(&q.symbol, q.last) else {
+                let Some((side, strat_name)) = self.signal_on_tick(&q.symbol, q.last) else {
                     continue;
                 };
                 let Some(px) = self.base_price(q) else {
@@ -1009,5 +1065,29 @@ pub async fn nordnet_task(cfg: Config, state: SharedState, flags: Arc<Flags>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::roll_bucket;
+
+    #[test]
+    fn bucket_closes_only_on_rollover() {
+        // Første observasjon: start lys, ingenting lukkes.
+        let (entry, closed) = roll_bucket(None, 100, 50.0);
+        assert_eq!(entry, (100, 50.0));
+        assert_eq!(closed, None);
+        // Samme lys: sluttkursen oppdateres, ingenting lukkes.
+        let (entry, closed) = roll_bucket(Some(entry), 100, 51.5);
+        assert_eq!(entry, (100, 51.5));
+        assert_eq!(closed, None);
+        // Nytt lys: forrige lukkes med SISTE kurs i lyset (51.5).
+        let (entry, closed) = roll_bucket(Some(entry), 101, 52.0);
+        assert_eq!(entry, (101, 52.0));
+        assert_eq!(closed, Some(51.5));
+        // Hopp over flere lys (stille marked): fortsatt bare én lukking.
+        let (_, closed) = roll_bucket(Some(entry), 105, 49.0);
+        assert_eq!(closed, Some(52.0));
     }
 }
