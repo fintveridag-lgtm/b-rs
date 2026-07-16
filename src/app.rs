@@ -31,36 +31,72 @@ pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path
 
     let store = Arc::new(store::Store::open(&cfg.db_path)?);
 
-    // Saldo-oppsummering fra megleren ved oppstart — logges når UI-et finnes.
-    let mut broker_summary: Option<String> = None;
+    // Tilstanden lages FØR megleren: multi-megleren leser valutakursene
+    // derfra for å regne kryptokontoen om til kroner.
+    let effective_mode = if cfg.is_live() && cfg.broker != "paper" { "live" } else { "paper" };
+    let broker_label = if !cfg.is_live() || cfg.broker == "paper" {
+        "paper".to_string()
+    } else if cfg.broker == "multi" {
+        format!("{} (aksjer) + {} (krypto)", cfg.multi.stocks, cfg.multi.crypto)
+    } else {
+        cfg.broker.clone()
+    };
+    let market = Arc::new(marketdata::Yahoo::new()?);
+    let state = Arc::new(Mutex::new(UiState::new(
+        effective_mode,
+        &broker_label,
+        cfg.nordnet.enabled,
+    )));
+
+    // Saldo-oppsummeringer fra meglerne ved oppstart — logges når UI-et finnes.
+    let mut broker_summaries: Vec<String> = Vec::new();
+
+    // Én undermegler etter navn — brukes både alene og inni multi.
+    let build_sub = |name: &str, summaries: &mut Vec<String>| -> Result<Arc<dyn Broker>> {
+        match name {
+            "paper" => Ok(Arc::new(broker::paper::PaperBroker::new(
+                cfg.starting_cash,
+                Some(store.clone()),
+                cfg.paper_reset,
+            ))),
+            "ibkr" => {
+                let ibkr_cfg = cfg.ibkr.as_ref().context("[ibkr]-seksjon mangler i konfig")?;
+                let b = broker::ibkr::IbkrBroker::new(ibkr_cfg)?;
+                rt.block_on(b.check_session())?;
+                Ok(Arc::new(b))
+            }
+            "revolutx" => {
+                let rx_cfg =
+                    cfg.revolutx.as_ref().context("[revolutx]-seksjon mangler i konfig")?;
+                let b = broker::revolutx::RevolutXBroker::new(rx_cfg)?;
+                summaries.push(rt.block_on(b.check_session())?);
+                Ok(Arc::new(b))
+            }
+            other => anyhow::bail!("ukjent megler: {other}"),
+        }
+    };
+
     let broker: Arc<dyn Broker> = match (cfg.is_live(), cfg.broker.as_str()) {
         (false, _) | (true, "paper") => Arc::new(broker::paper::PaperBroker::new(
             cfg.starting_cash,
             Some(store.clone()),
             cfg.paper_reset,
         )),
-        (true, "ibkr") => {
-            let ibkr_cfg = cfg.ibkr.as_ref().context("[ibkr]-seksjon mangler i konfig")?;
-            let b = broker::ibkr::IbkrBroker::new(ibkr_cfg)?;
-            rt.block_on(b.check_session())?;
-            Arc::new(b)
+        (true, "multi") => {
+            let stocks = build_sub(&cfg.multi.stocks, &mut broker_summaries)?;
+            let crypto = build_sub(&cfg.multi.crypto, &mut broker_summaries)?;
+            let crypto_currency = if cfg.multi.crypto == "revolutx" {
+                cfg.revolutx
+                    .as_ref()
+                    .map(|r| r.quote_currency.clone())
+                    .unwrap_or_default()
+            } else {
+                String::new() // papir fører kontoen i kroner
+            };
+            Arc::new(broker::multi::MultiBroker::new(stocks, crypto, crypto_currency, state.clone()))
         }
-        (true, "revolutx") => {
-            let rx_cfg = cfg.revolutx.as_ref().context("[revolutx]-seksjon mangler i konfig")?;
-            let b = broker::revolutx::RevolutXBroker::new(rx_cfg)?;
-            broker_summary = Some(rt.block_on(b.check_session())?);
-            Arc::new(b)
-        }
-        (true, other) => anyhow::bail!("ukjent megler: {other}"),
+        (true, name) => build_sub(name, &mut broker_summaries)?,
     };
-
-    let effective_mode = if cfg.is_live() && cfg.broker != "paper" { "live" } else { "paper" };
-    let market = Arc::new(marketdata::Yahoo::new()?);
-    let state = Arc::new(Mutex::new(UiState::new(
-        effective_mode,
-        broker.name(),
-        cfg.nordnet.enabled,
-    )));
     {
         let mut st = state.lock().unwrap();
         st.log_path = prepare_log_file(&cfg.db_path);
@@ -89,17 +125,22 @@ pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path
         if let Some(msg) = backup_msg {
             st.log(msg);
         }
-        if let Some(msg) = broker_summary {
+        for msg in broker_summaries {
             st.log(msg);
         }
         // Kontanter/egenkapital vises i meglerens valuta — USD hos Revolut X.
+        // Multi aggregerer alt til kroner (kontoene vises hver for seg).
         if cfg.is_live() && cfg.broker == "revolutx" {
             if let Some(rx) = &cfg.revolutx {
                 st.cash_currency = rx.quote_currency.clone();
             }
         }
         // Fortell brukeren om papirporteføljen ble gjenopprettet.
-        if !cfg.is_live() || cfg.broker == "paper" {
+        let uses_paper = !cfg.is_live()
+            || cfg.broker == "paper"
+            || (cfg.broker == "multi"
+                && (cfg.multi.stocks == "paper" || cfg.multi.crypto == "paper"));
+        if uses_paper {
             if cfg.paper_reset {
                 st.log("Papirporteføljen er nullstilt (paper_reset = true).");
             } else if let Ok(Some((cash, positions))) = store.load_paper_state() {

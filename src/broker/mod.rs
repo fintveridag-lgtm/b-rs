@@ -1,4 +1,5 @@
 pub mod ibkr;
+pub mod multi;
 pub mod paper;
 pub mod revolutx;
 
@@ -23,4 +24,11 @@ pub trait Broker: Send + Sync {
 
     /// Ny kurs observert — papirmegleren bruker dette til å markere posisjoner.
     async fn on_quote(&self, _symbol: &str, _price: f64) {}
+
+    /// Kontoene bak megleren som (navn, kontanter, valuta) — én per
+    /// undermegler for multi. Tom liste (standard) betyr «én konto,
+    /// bruk cash()» — da slipper enkle meglere et ekstra API-kall.
+    async fn accounts(&self) -> Vec<(String, f64, String)> {
+        Vec::new()
+    }
 }

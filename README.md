@@ -45,7 +45,7 @@ Taster i terminalversjonen: `q` avslutt · `k` kill switch (kanseller + stopp ha
 
 | Modul | Ansvar |
 |---|---|
-| `broker/` | `Broker`-traiten + implementasjoner: `paper` (simulering), `ibkr` (aksjer, Interactive Brokers) og `revolutx` (krypto, Revolut X med Ed25519-signert REST) |
+| `broker/` | `Broker`-traiten + implementasjoner: `paper` (simulering), `ibkr` (aksjer, Interactive Brokers), `revolutx` (krypto, Revolut X med Ed25519-signert REST) og `multi` (to samtidig, rutet på symboltype — f.eks. ekte krypto + papiraksjer) |
 | `marketdata` | Kurser og historikk fra Yahoo Finance (gratis, ~15 min forsinket; `.OL`-suffiks for Oslo Børs) |
 | `market` | Markedsskjermene: mest omsatte, daytrading-kandidater, fond/ETF-er og teknisk ukesanalyse |
 | `morgan` | 🧠 AI-analysesjefen: screening, aksje-dypdykk og porteføljevurdering. To hjerner: Claude (Anthropic, krever `ANTHROPIC_API_KEY`) **eller helt lokal modell via [Ollama](https://ollama.com)** — gratis, privat, offline (`[morgan] provider = "ollama"`) |

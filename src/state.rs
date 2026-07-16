@@ -114,6 +114,9 @@ pub struct UiState {
     /// Valutaen kontanter/egenkapital vises i: "kr" (papir) eller
     /// meglerens kontovaluta ("USD" hos Revolut X).
     pub cash_currency: String,
+    /// Kontoene bak megleren som (navn, kontanter, valuta) — flere ved
+    /// multi-megler (aksjer + krypto), ellers én.
+    pub accounts: Vec<(String, f64, String)>,
     /// Daglig egenkapital over tid (unixtid, verdi) — varig historikk.
     pub equity_daily: Vec<(f64, f64)>,
     /// Referanseindeksen (unixtid, kurs) til «slår jeg børsen?»-grafen.
@@ -230,6 +233,7 @@ impl UiState {
             morgan_archive: Vec::new(),
             autopilot_status: None,
             cash_currency: "kr".to_string(),
+            accounts: Vec::new(),
             equity_daily: Vec::new(),
             benchmark: Vec::new(),
             benchmark_name: String::new(),

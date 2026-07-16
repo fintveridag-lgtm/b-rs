@@ -569,6 +569,7 @@ impl Engine {
         // 6) Oppdater UI-tilstand.
         let positions = self.broker.positions().await.unwrap_or(positions);
         let cash = self.broker.cash().await.unwrap_or(cash);
+        let accounts = self.broker.accounts().await;
         let equity = cash + positions.iter().map(|p| p.market_value()).sum::<f64>();
         let drawdown = self.risk.drawdown(equity);
         {
@@ -580,6 +581,7 @@ impl Engine {
             }
             st.positions = positions;
             st.cash = cash;
+            st.accounts = accounts;
             st.equity = equity;
             st.drawdown = drawdown;
             st.push_equity(now.timestamp() as f64, equity);

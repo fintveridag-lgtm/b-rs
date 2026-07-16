@@ -55,6 +55,32 @@ pub struct Config {
     pub benchmark: String,
     #[serde(default)]
     pub morgan: MorganCfg,
+    /// Brukes når broker = "multi": to meglere samtidig, rutet på symboltype.
+    #[serde(default)]
+    pub multi: MultiCfg,
+}
+
+/// Multi-megler: krypto (BTC-USD o.l.) går til én megler, aksjer/fond til en
+/// annen — samtidig. Eksempel: ekte krypto hos Revolut X mens aksjer
+/// simuleres i papirmodus (eller handles ekte hos IBKR).
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct MultiCfg {
+    /// "paper" eller "revolutx".
+    #[serde(default = "default_paper")]
+    pub crypto: String,
+    /// "paper" eller "ibkr".
+    #[serde(default = "default_paper")]
+    pub stocks: String,
+}
+
+impl Default for MultiCfg {
+    fn default() -> Self {
+        Self { crypto: default_paper(), stocks: default_paper() }
+    }
+}
+
+fn default_paper() -> String {
+    "paper".to_string()
 }
 
 /// Hjernen bak Morgan: "claude" (Anthropic API, best kvalitet, krever
@@ -394,6 +420,32 @@ impl Config {
                 cfg.revolutx.is_some(),
                 "mode=live med broker=revolutx krever [revolutx]-seksjon"
             );
+        }
+        if cfg.broker == "multi" {
+            anyhow::ensure!(
+                !(cfg.multi.crypto == "paper" && cfg.multi.stocks == "paper"),
+                "[multi] med både crypto=paper og stocks=paper er det samme som broker=\"paper\" — bruk det i stedet"
+            );
+            anyhow::ensure!(
+                matches!(cfg.multi.crypto.as_str(), "paper" | "revolutx"),
+                "[multi] crypto må være \"paper\" eller \"revolutx\""
+            );
+            anyhow::ensure!(
+                matches!(cfg.multi.stocks.as_str(), "paper" | "ibkr"),
+                "[multi] stocks må være \"paper\" eller \"ibkr\""
+            );
+            if cfg.mode == "live" && cfg.multi.crypto == "revolutx" {
+                anyhow::ensure!(
+                    cfg.revolutx.is_some(),
+                    "[multi] crypto=revolutx i live-modus krever [revolutx]-seksjon"
+                );
+            }
+            if cfg.mode == "live" && cfg.multi.stocks == "ibkr" {
+                anyhow::ensure!(
+                    cfg.ibkr.is_some(),
+                    "[multi] stocks=ibkr i live-modus krever [ibkr]-seksjon"
+                );
+            }
         }
         Ok(cfg)
     }

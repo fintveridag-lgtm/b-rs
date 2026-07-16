@@ -551,7 +551,14 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let cur = &st.cash_currency;
-                stat_card(ui, "Kontanter", format!("{} {cur}", fmt_thousands(st.cash)), Color32::WHITE);
+                if st.accounts.len() > 1 {
+                    // Multi-megler: én kontantboks per konto, i kontoens valuta.
+                    for (navn, belop, valuta) in &st.accounts {
+                        stat_card(ui, navn, format!("{} {valuta}", fmt_thousands(*belop)), Color32::WHITE);
+                    }
+                } else {
+                    stat_card(ui, "Kontanter", format!("{} {cur}", fmt_thousands(st.cash)), Color32::WHITE);
+                }
                 stat_card(ui, "Egenkapital", format!("{} {cur}", fmt_thousands(st.equity)), Color32::WHITE);
                 let pnl_color = if st.drawdown >= 0.0 { GREEN } else { RED };
                 let sign = if st.drawdown >= 0.0 { "+" } else { "" };
@@ -1992,6 +1999,23 @@ impl App {
                         ("I dag", format!("{}{} {cur} ({:+.2} %)", plus(day_kr), fmt_thousands(day_kr), day_pct), updown(day_kr)),
                         ("Total avkastning", format!("{}{} {cur} ({:+.2} %)", plus(total_kr), fmt_thousands(total_kr), total_pct), updown(total_kr)),
                     ]);
+                    // Multi-megler: vis hver underkonto med egen valuta og
+                    // verdien av dens del av beholdningen (i kroner).
+                    if st.accounts.len() > 1 {
+                        for (navn, belop, valuta) in &st.accounts {
+                            let er_krypto = navn.contains("krypto");
+                            let posisjonsverdi: f64 = st
+                                .positions
+                                .iter()
+                                .filter(|p| crate::types::is_crypto(&p.symbol) == er_krypto)
+                                .map(|p| p.market_value())
+                                .sum();
+                            account_card(ui, navn, &[
+                                ("Kontanter", format!("{} {valuta}", fmt_thousands(*belop)), Color32::WHITE),
+                                ("Beholdning (i kr)", format!("{} kr", fmt_thousands(posisjonsverdi)), GRAY),
+                            ]);
+                        }
+                    }
                     if st.nordnet_enabled {
                         let nn_value: f64 = st.nordnet_positions.iter().map(|p| p.market_value).sum();
                         account_card(ui, "Nordnet (lesemodus)", &[
@@ -3545,6 +3569,18 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
          backups/ — daglig kopi av databasen, 14 beholdes.\n\
          b-rs.log — logg over alt som skjer, for feilsøking.\n\
          b-rs-realisert-gevinst.csv — skatterapporten (eksporteres fra 💳-fanen).",
+    ),
+    (
+        "🔀 Multi-megler (krypto + aksjer samtidig)",
+        "Vil du handle EKTE krypto hos Revolut X og samtidig ha norske aksjer (papir eller ekte via \
+         IBKR)? Sett broker = \"multi\" i config.toml og legg til:\n\
+         [multi]\n\
+         crypto = \"revolutx\"\n\
+         stocks = \"paper\"\n\
+         Appen ruter da automatisk: kryptoordrer til kryptomegleren, aksjeordrer til aksjemegleren — \
+         også for strategien, limit-ordrer, spareavtaler og Morgan Autopilot. Toppfeltet og Portefølje \
+         viser én kontantboks per konto (USD hos Revolut, kroner for aksjene), mens egenkapital, grafer \
+         og risikogrenser regnes samlet i kroner.",
     ),
     (
         "⚠️ Viktig",
