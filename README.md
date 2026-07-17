@@ -71,7 +71,7 @@ tydelig «sist kjente kurser»-varsel, og «📡 Test tilkobling» i Innstilling
 | `pnl` | Realisert gevinst/tap (FIFO) og skatterapport-eksport (CSV) |
 | `engine` | Hovedløkken: kurser → strategi → risikosjekk → ordre → tilstand |
 | `nordnet` | **Lesemodus** mot Nordnets uoffisielle web-API (kun portefølje, aldri handel) |
-| `tipping` | 🎱 Norsk Tipping-analyse: egen `b-tipping`-binær som henter inntil 30 års trekningshistorikk (Lotto, Vikinglotto, Eurojackpot) og gir frekvensstatistikk + rekker med lav forventet premiedeling — se [NORSK_TIPPING.md](NORSK_TIPPING.md) |
+| `tipping` | 🎱 Norsk Tipping-analyse: vindusappen `b-tipping-gui` og terminalversjonen `b-tipping` henter inntil 30 års trekningshistorikk (Lotto, Vikinglotto, Eurojackpot) og gir frekvensstatistikk + rekker med lav forventet premiedeling — se [NORSK_TIPPING.md](NORSK_TIPPING.md) |
 | `notify` | Push-varsler til mobil via ntfy.sh eller Telegram (ordrer, kill switch, tapsgrense) |
 | `store` | SQLite-logg over alle ordrer og hendelser (feilsøking + skattegrunnlag) |
 | `gui` | egui-vindusapp med kursgraf (standard) |

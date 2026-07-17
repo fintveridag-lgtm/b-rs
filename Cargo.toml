@@ -22,6 +22,11 @@ path = "src/gui_main.rs"
 name = "b-tipping"
 path = "src/bin/b-tipping.rs"
 
+# Samme analyse som egen vindusapp (uten konsollvindu på Windows).
+[[bin]]
+name = "b-tipping-gui"
+path = "src/bin/b-tipping-gui.rs"
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"

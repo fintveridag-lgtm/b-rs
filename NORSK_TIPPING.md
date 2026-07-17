@@ -10,10 +10,17 @@ Et eget kommandolinjeprogram som henter trekningshistorikk for **Lotto,
 Vikinglotto og Eurojackpot** (inntil 30 år tilbake) og analyserer den:
 
 ```bash
+cargo run --release --bin b-tipping-gui      # 🪟 vindusapp: knapper, graf og rekker
 cargo run --bin b-tipping -- hent            # last ned historikk til data/tipping/
 cargo run --bin b-tipping -- analyse         # statistikk + 10 foreslåtte rekker
 cargo run --bin b-tipping -- analyse lotto --rekker 10 --fro 42
 ```
+
+**`b-tipping-gui`** er en egen vindusapp (uten konsollvindu på Windows):
+faner for Lotto/Vikinglotto/Eurojackpot, «Hent historikk»-knapp som laster
+ned i bakgrunnen med fremdrift, frekvensgraf med forventningslinje,
+chi-kvadrat-vurdering og de 10 rekkene med kopier-knapp. Kommandolinje-
+versjonen `b-tipping` gjør det samme i terminalen.
 
 Det analysen gir deg:
 
