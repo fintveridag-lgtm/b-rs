@@ -9,6 +9,11 @@ pub trait Strategy: Send {
     /// Så strategien med historiske sluttkurser (eldst først) ved oppstart.
     fn seed(&mut self, symbol: &str, closes: &[f64]);
     fn on_price(&mut self, symbol: &str, price: f64) -> Option<Side>;
+    /// «Hva ser boten?» — strategiens ståsted for symbolet i klartekst,
+    /// regnet på dens EGNE tall (ikke grafens). None før nok data.
+    fn status(&self, _symbol: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Klassisk SMA-krysning: kjøp når raskt glidende snitt krysser over tregt,
@@ -74,6 +79,24 @@ impl Strategy for SmaCross {
             Some(true) if !now_above => Some(Side::Sell),
             _ => None,
         }
+    }
+
+    fn status(&self, symbol: &str) -> Option<String> {
+        let w = self.prices.get(symbol)?;
+        let fast = Self::sma(w, self.fast)?;
+        let slow = Self::sma(w, self.slow)?;
+        let gap = (fast / slow - 1.0) * 100.0;
+        Some(if fast > slow {
+            format!(
+                "Rask SMA{} ({fast:.2}) er {gap:+.2} % OVER treg SMA{} ({slow:.2}) — oppgangsmodus, selger ved kryss ned.",
+                self.fast, self.slow
+            )
+        } else {
+            format!(
+                "Rask SMA{} ({fast:.2}) er {:.2} % UNDER treg SMA{} ({slow:.2}) — venter på kryss opp før kjøp.",
+                self.fast, -gap, self.slow
+            )
+        })
     }
 }
 
@@ -155,6 +178,21 @@ impl Strategy for Rsi {
             None
         }
     }
+
+    fn status(&self, symbol: &str) -> Option<String> {
+        let rsi = *self.prev.get(symbol)?;
+        let tilstand = if rsi < self.buy_below {
+            "oversolgt"
+        } else if rsi > self.sell_above {
+            "overkjøpt"
+        } else {
+            "nøytral"
+        };
+        Some(format!(
+            "RSI({}) = {rsi:.0} — {tilstand}. Kjøper ved fall under {:.0}, selger ved stigning over {:.0}.",
+            self.period, self.buy_below, self.sell_above
+        ))
+    }
 }
 
 /// Momentum/brudd: kjøp når kursen bryter over høyeste i vinduet,
@@ -211,6 +249,19 @@ impl Strategy for Momentum {
         };
         self.push(symbol, price);
         signal
+    }
+
+    fn status(&self, symbol: &str) -> Option<String> {
+        let w = self.closes.get(symbol)?;
+        if w.len() < self.window {
+            return None;
+        }
+        let max = w.iter().cloned().fold(f64::MIN, f64::max);
+        let min = w.iter().cloned().fold(f64::MAX, f64::min);
+        Some(format!(
+            "Vindu {} lys: kjøper ved brudd over {max:.2}, selger ved brudd under {min:.2}.",
+            self.window
+        ))
     }
 }
 
@@ -281,6 +332,15 @@ impl Strategy for Macd {
             None
         }
     }
+
+    fn status(&self, symbol: &str) -> Option<String> {
+        let hist = *self.prev_hist.get(symbol)?;
+        Some(if hist > 0.0 {
+            format!("MACD-histogram {hist:+.2} (positivt) — oppgangsmodus, selger når det snur negativt.")
+        } else {
+            format!("MACD-histogram {hist:+.2} (negativt) — venter på at det krysser opp i pluss før kjøp.")
+        })
+    }
 }
 
 /// Bollinger-bånd (20 dager, ±2 standardavvik): kjøp når kursen faller
@@ -343,6 +403,13 @@ impl Strategy for Bollinger {
         self.push(symbol, price);
         signal
     }
+
+    fn status(&self, symbol: &str) -> Option<String> {
+        let (lower, upper) = self.bands(symbol)?;
+        Some(format!(
+            "Bollinger-bånd (20 lys, ±2σ): {lower:.2}–{upper:.2}. Kjøper under nedre bånd, selger over øvre."
+        ))
+    }
 }
 
 /// Strategiene brukeren kan velge mellom i appen.
@@ -399,6 +466,26 @@ mod tests {
         assert_eq!(s.on_price("X", 90.0), Some(Side::Buy));
         // Kraftig oppgang → RSI over 70 → selg.
         assert_eq!(s.on_price("X", 120.0), Some(Side::Sell));
+    }
+
+    #[test]
+    fn status_explains_what_the_bot_sees() {
+        let mut s = SmaCross::new(&cfg(2, 4));
+        // Ingen status før nok data.
+        assert!(s.status("X").is_none());
+        s.seed("X", &[100.0, 101.0, 102.0, 103.0, 104.0]);
+        // Stigende serie: rask over treg.
+        let status = s.status("X").unwrap();
+        assert!(status.contains("OVER"), "fikk: {status}");
+        // Fallende serie: rask under treg.
+        let mut s = SmaCross::new(&cfg(2, 4));
+        s.seed("Y", &[110.0, 108.0, 106.0, 104.0, 102.0]);
+        let status = s.status("Y").unwrap();
+        assert!(status.contains("UNDER"), "fikk: {status}");
+
+        let mut r = Rsi::new(&StrategyCfg { rsi_period: 3, ..StrategyCfg::default() });
+        r.seed("X", &[100.0, 101.0, 102.0, 103.0]);
+        assert!(r.status("X").unwrap().contains("RSI"));
     }
 
     #[test]

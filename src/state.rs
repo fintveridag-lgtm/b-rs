@@ -120,6 +120,9 @@ pub struct UiState {
     /// Kontoene bak megleren som (navn, kontanter, valuta) — flere ved
     /// multi-megler (aksjer + krypto), ellers én.
     pub accounts: Vec<(String, f64, String)>,
+    /// «Hva ser boten?» per symbol — strategiens eget ståsted i klartekst,
+    /// regnet på dens egne lys (ikke grafens).
+    pub strategy_status: BTreeMap<String, String>,
     /// Daglig egenkapital over tid (unixtid, verdi) — varig historikk.
     pub equity_daily: Vec<(f64, f64)>,
     /// Referanseindeksen (unixtid, kurs) til «slår jeg børsen?»-grafen.
@@ -238,6 +241,7 @@ impl UiState {
             autopilot_status: None,
             cash_currency: "kr".to_string(),
             accounts: Vec::new(),
+            strategy_status: BTreeMap::new(),
             equity_daily: Vec::new(),
             benchmark: Vec::new(),
             benchmark_name: String::new(),

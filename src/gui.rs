@@ -795,6 +795,51 @@ impl App {
                         }
                     });
                 }
+                // 🤖 «Hva ser boten?» — strategiens eget ståsted for valgt
+                // symbol, regnet på dens egne lys (ikke grafens linjer).
+                if let Some(sel) = self.selected.clone() {
+                    egui::Frame::none()
+                        .fill(BG_CARD)
+                        .stroke(egui::Stroke::new(1.0, BORDER))
+                        .rounding(egui::Rounding::same(8.0))
+                        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("🤖 Hva ser boten?").strong().small().color(GRAY));
+                            match st.strategy_status.get(&sel) {
+                                Some(status) => {
+                                    ui.label(RichText::new(status).small());
+                                }
+                                None => {
+                                    ui.label(RichText::new("Samler data … (venter på nok lys)").small().color(GRAY));
+                                }
+                            }
+                            match st.positions.iter().find(|p| p.symbol == sel) {
+                                Some(p) => {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Eier {} stk — neste handling er et SALGSSIGNAL.",
+                                            fmt_qty(p.qty)
+                                        ))
+                                        .small()
+                                        .color(BLUE),
+                                    );
+                                }
+                                None => {
+                                    ui.label(
+                                        RichText::new("Flat (eier ingenting) — neste handling er et KJØPSSIGNAL.")
+                                            .small()
+                                            .color(GRAY),
+                                    );
+                                }
+                            }
+                            if self.flags.killed() {
+                                ui.label(RichText::new("⛔ KILL SWITCH er PÅ — ingen signaler utføres.").small().color(RED));
+                            } else if self.flags.paused() {
+                                ui.label(RichText::new("⏸ Strategien er PAUSET — signaler utføres ikke.").small().color(YELLOW));
+                            }
+                        });
+                }
+
                 ui.horizontal(|ui| {
                     if ui.button("🧪 Backtest (2 år)").clicked() {
                         self.backtest = Some(run_backtest(self.selected.as_deref(), &self.strategy_choice, st));

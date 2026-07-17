@@ -315,30 +315,58 @@ impl Engine {
         if !self.ensure_strategy(&name) {
             return None;
         }
-        let key = (name.clone(), symbol.to_string());
-        if !self.strategy_seeded.contains(&key) {
-            // Så med samme oppløsning som strategien handler på: intradag-lys
-            // når tidsramme er valgt, ellers dagshistorikken.
-            let st = self.state.lock().unwrap();
-            let closes: Vec<f64> = if self.cfg.strategy.timeframe_min > 0 {
-                st.candles_intraday
-                    .get(symbol)
-                    .map(|c| c.iter().map(|b| b.close).collect())
-                    .unwrap_or_default()
-            } else {
-                st.history
-                    .get(symbol)
-                    .map(|h| h.iter().map(|&(_, p)| p).collect())
-                    .unwrap_or_default()
-            };
-            drop(st);
-            if let Some(s) = self.strategies.get_mut(&name) {
-                s.seed(symbol, &closes);
-            }
-            self.strategy_seeded.insert(key);
-        }
+        self.seed_if_needed(&name, symbol);
         let side = self.strategies.get_mut(&name)?.on_price(symbol, price)?;
         Some((side, name))
+    }
+
+    /// Så strategien for symbolet hvis det ikke er gjort — med samme
+    /// oppløsning som den handler på: intradag-lys når tidsramme er valgt,
+    /// ellers dagshistorikken.
+    fn seed_if_needed(&mut self, name: &str, symbol: &str) {
+        let key = (name.to_string(), symbol.to_string());
+        if self.strategy_seeded.contains(&key) {
+            return;
+        }
+        let st = self.state.lock().unwrap();
+        let closes: Vec<f64> = if self.cfg.strategy.timeframe_min > 0 {
+            st.candles_intraday
+                .get(symbol)
+                .map(|c| c.iter().map(|b| b.close).collect())
+                .unwrap_or_default()
+        } else {
+            st.history
+                .get(symbol)
+                .map(|h| h.iter().map(|&(_, p)| p).collect())
+                .unwrap_or_default()
+        };
+        drop(st);
+        if closes.is_empty() {
+            return; // historikken er ikke lastet ennå — prøv igjen neste tikk
+        }
+        if let Some(s) = self.strategies.get_mut(name) {
+            s.seed(symbol, &closes);
+        }
+        self.strategy_seeded.insert(key);
+    }
+
+    /// «Hva ser boten?» — strategiens eget ståsted for symbolet, til UI-et.
+    fn strategy_view(&mut self, symbol: &str) -> Option<String> {
+        let name = {
+            let st = self.state.lock().unwrap();
+            st.symbol_strategy
+                .get(symbol)
+                .cloned()
+                .unwrap_or_else(|| st.strategy_name.clone())
+        };
+        if !self.ensure_strategy(&name) {
+            return None;
+        }
+        self.seed_if_needed(&name, symbol);
+        let status = self.strategies.get(&name)?.status(symbol)?;
+        let tf = self.cfg.strategy.timeframe_min;
+        let ramme = if tf > 0 { format!("{tf} min-lys") } else { "hvert tikk".to_string() };
+        Some(format!("[{name} · {ramme}] {status}"))
     }
 
     /// Signal per tikk — men med tidsramme (timeframe_min > 0) samles
@@ -427,6 +455,14 @@ impl Engine {
                     self.notify(msg.clone());
                     self.state.lock().unwrap().toast(msg);
                 }
+            }
+        }
+
+        // 1c) «Hva ser boten?» — strategienes ståsted per symbol til UI-et.
+        //     Oppdateres også under pause/kill, så panelet alltid er ærlig.
+        for symbol in fresh.iter().map(|q| q.symbol.clone()).collect::<Vec<_>>() {
+            if let Some(view) = self.strategy_view(&symbol) {
+                self.state.lock().unwrap().strategy_status.insert(symbol, view);
             }
         }
 
