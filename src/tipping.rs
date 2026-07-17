@@ -14,7 +14,7 @@
 //! fungerer uten nett.
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -196,15 +196,54 @@ fn tall_liste(felt: &str) -> Vec<u8> {
         .collect()
 }
 
-// ─────────────────────── Henting fra Norsk Tipping ───────────────────────
+// ───────────────────────── Henting av historikk ─────────────────────────
+//
+// To kilder, prøvd i rekkefølge:
+//
+// 1. **Veikkaus** (det finske spillselskapet) har et åpent, veldokumentert
+//    resultat-API. Vikinglotto og Eurojackpot er *fellestrekninger* på tvers
+//    av landene, så vinnertallene der er identiske med Norsk Tippings.
+//    Gjelder ikke norsk Lotto (finsk Lotto er et annet spill).
+// 2. **Norsk Tippings uoffisielle** drawID-endepunkt (historisk
+//    `/api-{spill}/getResultInfo.json?drawID=`). Kan være lagt ned;
+//    `--endepunkt` overstyrer malen, og `b-tipping sonde` tester kandidatene.
 
-/// Standard endepunktmal. `{spill}` og `{id}` byttes ut; tom `{id}` gir siste
-/// trekning. Uoffisielt API — kan slutte å virke uten varsel.
+/// Standard endepunktmal for Norsk Tipping-kilden. `{spill}` og `{id}`
+/// byttes ut; tom `{id}` gir siste trekning.
 pub const ENDEPUNKT_MAL: &str =
     "https://www.norsk-tipping.no/api-{spill}/getResultInfo.json?drawID={id}";
 
-/// Hent historikk bakover fra siste trekning til `fra_dato`.
-/// Går drawID-ene nedover; gir opp etter `maks_feil` sammenhengende feil.
+/// Kandidat-maler for Norsk Tipping-kilden, prøvd i rekkefølge.
+pub const NT_MALER: [&str; 2] = [
+    ENDEPUNKT_MAL,
+    "https://www.norsk-tipping.no/api/{spill}/getResultInfo.json?drawID={id}",
+];
+
+impl Spill {
+    /// Spillnavn-kandidater i Veikkaus-API-et (tom = ikke fellestrekning).
+    pub fn veikkaus_navn(self) -> &'static [&'static str] {
+        match self {
+            Spill::Lotto => &[],
+            Spill::Vikinglotto => &["VIKINGLOTTO", "VIKING"],
+            Spill::Eurojackpot => &["EJACKPOT"],
+        }
+    }
+}
+
+/// URL for én ISO-uke i Veikkaus-API-et.
+pub fn veikkaus_uke_url(spillnavn: &str, dato: NaiveDate) -> String {
+    let uke = dato.iso_week();
+    format!(
+        "https://www.veikkaus.fi/api/draw-games/v1/games/{}/draws/by-week/{}-W{:02}",
+        spillnavn,
+        uke.year(),
+        uke.week()
+    )
+}
+
+/// Hent historikk bakover fra i dag til `fra_dato`, fra første kilde som
+/// svarer med data. Med `endepunkt_mal` satt brukes kun Norsk Tipping-kilden
+/// med den malen.
 pub async fn hent_historikk(
     klient: &reqwest::Client,
     spill: Spill,
@@ -212,19 +251,93 @@ pub async fn hent_historikk(
     endepunkt_mal: Option<&str>,
     fremdrift: impl Fn(usize, NaiveDate),
 ) -> Result<Vec<Trekning>> {
-    let mal = endepunkt_mal.unwrap_or(ENDEPUNKT_MAL);
+    if let Some(mal) = endepunkt_mal {
+        return hent_nt_drawid(klient, spill, fra_dato, mal, &fremdrift).await;
+    }
+    let mut feil: Vec<String> = Vec::new();
+    for navn in spill.veikkaus_navn() {
+        match hent_veikkaus(klient, spill, navn, fra_dato, &fremdrift).await {
+            Ok(t) if !t.is_empty() => return Ok(t),
+            Ok(_) => feil.push(format!("Veikkaus {navn}: ingen trekninger i svarene")),
+            Err(e) => feil.push(format!("Veikkaus {navn}: {e:#}")),
+        }
+    }
+    for mal in NT_MALER {
+        match hent_nt_drawid(klient, spill, fra_dato, mal, &fremdrift).await {
+            Ok(t) if !t.is_empty() => return Ok(t),
+            Ok(_) => feil.push(format!("Norsk Tipping ({mal}): ingen trekninger")),
+            Err(e) => feil.push(format!("Norsk Tipping ({mal}): {e:#}")),
+        }
+    }
+    bail!(
+        "alle kilder feilet for {} — kjør `b-tipping sonde` og se hva som svarer. \
+         Detaljer: {}",
+        spill.navn(),
+        feil.join(" · ")
+    )
+}
+
+/// Veikkaus: gå uke for uke bakover og les fellestrekningene.
+async fn hent_veikkaus(
+    klient: &reqwest::Client,
+    spill: Spill,
+    spillnavn: &str,
+    fra_dato: NaiveDate,
+    fremdrift: &impl Fn(usize, NaiveDate),
+) -> Result<Vec<Trekning>> {
+    let mut trekninger: Vec<Trekning> = Vec::new();
+    let mut dato = chrono::Local::now().date_naive();
+    let mut tomme_paa_rad = 0usize;
+    // Første uken må svare — ellers er kilden/navnet feil, og vi gir oss raskt.
+    let forste_url = veikkaus_uke_url(spillnavn, dato);
+    let forste = hent_json(klient, &forste_url)
+        .await
+        .with_context(|| format!("fikk ikke kontakt med Veikkaus ({forste_url})"))?;
+    for t in tolk_trekninger_liste(&forste, spill) {
+        trekninger.push(t);
+    }
+    dato -= chrono::Duration::weeks(1);
+
+    while dato >= fra_dato && tomme_paa_rad < 26 {
+        match hent_json(klient, &veikkaus_uke_url(spillnavn, dato)).await {
+            Ok(v) => {
+                let ny = tolk_trekninger_liste(&v, spill);
+                if ny.is_empty() {
+                    tomme_paa_rad += 1;
+                } else {
+                    tomme_paa_rad = 0;
+                    for t in ny {
+                        fremdrift(trekninger.len() + 1, t.dato);
+                        trekninger.push(t);
+                    }
+                }
+            }
+            Err(_) => tomme_paa_rad += 1,
+        }
+        dato -= chrono::Duration::weeks(1);
+        // Vær høflig mot serveren.
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    }
+
+    rydd(&mut trekninger, fra_dato);
+    Ok(trekninger)
+}
+
+/// Norsk Tipping: finn siste drawID og gå ID-ene nedover.
+async fn hent_nt_drawid(
+    klient: &reqwest::Client,
+    spill: Spill,
+    fra_dato: NaiveDate,
+    mal: &str,
+    fremdrift: &impl Fn(usize, NaiveDate),
+) -> Result<Vec<Trekning>> {
     let url_for = |id: Option<u64>| {
         mal.replace("{spill}", spill.api_navn())
             .replace("{id}", &id.map(|i| i.to_string()).unwrap_or_default())
     };
 
-    // Siste trekning forteller oss høyeste drawID.
     let siste = hent_json(klient, &url_for(None)).await.with_context(|| {
-        format!(
-            "fikk ikke kontakt med resultat-API-et for {} — endepunktet er uoffisielt \
-             og kan være endret; prøv --endepunkt med ny URL-mal",
-            spill.navn()
-        )
+        format!("fikk ikke kontakt med resultat-API-et for {}", spill.navn())
     })?;
     let siste_id = finn_tall_felt(&siste, &["drawID", "drawId", "drawNumber", "trekningsnummer"])
         .ok_or_else(|| anyhow!("fant ikke drawID i svaret fra API-et"))? as u64;
@@ -256,40 +369,96 @@ pub async fn hent_historikk(
                 }
             }
         }
-        // Vær høflig mot serveren.
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
 
-    trekninger.retain(|t| t.dato >= fra_dato);
-    trekninger.sort_by_key(|t| t.dato);
-    trekninger.dedup_by_key(|t| t.dato);
+    rydd(&mut trekninger, fra_dato);
     if trekninger.is_empty() {
         bail!("ingen trekninger hentet for {}", spill.navn());
     }
     Ok(trekninger)
 }
 
+fn rydd(trekninger: &mut Vec<Trekning>, fra_dato: NaiveDate) {
+    trekninger.retain(|t| t.dato >= fra_dato);
+    trekninger.sort_by_key(|t| t.dato);
+    trekninger.dedup_by_key(|t| t.dato);
+}
+
+/// Test alle kjente endepunkt-kandidater og rapporter hva de svarer.
+/// Til feilsøking når kildene endrer seg: `b-tipping sonde`.
+pub async fn sonde(klient: &reqwest::Client) -> Vec<(String, String)> {
+    let mut urler: Vec<String> = Vec::new();
+    let idag = chrono::Local::now().date_naive();
+    for spill in Spill::ALLE {
+        for navn in spill.veikkaus_navn() {
+            urler.push(veikkaus_uke_url(navn, idag));
+        }
+        for mal in NT_MALER {
+            urler.push(mal.replace("{spill}", spill.api_navn()).replace("{id}", ""));
+        }
+    }
+    urler.dedup();
+    let mut rapport = Vec::new();
+    for url in urler {
+        let utfall = match klient.get(&url).header("Accept", "application/json").send().await {
+            Ok(svar) => {
+                let status = svar.status();
+                let tekst = svar.text().await.unwrap_or_default();
+                let utdrag: String = tekst.chars().take(160).collect();
+                format!("{} — {}", status, utdrag.replace(['\n', '\r'], " "))
+            }
+            Err(e) => format!("FEIL: {e}"),
+        };
+        rapport.push((url, utfall));
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    }
+    rapport
+}
+
 async fn hent_json(klient: &reqwest::Client, url: &str) -> Result<Value> {
     let tekst = klient
         .get(url)
         .header("Accept", "application/json")
+        // Veikkaus' egne eksempler bruker denne; ufarlig for andre kilder.
+        .header("X-ESA-API-Key", "ROBOT")
         .send()
         .await?
         .error_for_status()?
         .text()
         .await?;
-    // API-et har historisk lagt `while(true);/* 0;` og `/* */` foran JSON-en.
+    // Norsk Tipping har historisk lagt `while(true);/* 0;` o.l. foran JSON-en.
     let renset = tekst
         .trim_start_matches("while(true);")
         .trim_start_matches("/* 0;")
         .trim_start_matches("/* */")
         .trim();
-    // Siste utvei: klipp fra første '{' til siste '}'.
-    let json_del = match (renset.find('{'), renset.rfind('}')) {
-        (Some(fra), Some(til)) if til > fra => &renset[fra..=til],
+    // Klipp til ytterste objekt ELLER liste — svar kan være begge deler.
+    let obj = renset.find('{').zip(renset.rfind('}'));
+    let liste = renset.find('[').zip(renset.rfind(']'));
+    let json_del = match (obj, liste) {
+        (Some((of, _)), Some((lf, lt))) if lf < of => &renset[lf..=lt],
+        (Some((of, ot)), _) if ot > of => &renset[of..=ot],
+        (_, Some((lf, lt))) if lt > lf => &renset[lf..=lt],
         _ => renset,
     };
     Ok(serde_json::from_str(json_del)?)
+}
+
+/// Tolk et svar som kan inneholde flere trekninger (liste, eller objekt med
+/// `draws`-liste), i tillegg til enkelttrekninger.
+pub fn tolk_trekninger_liste(v: &Value, spill: Spill) -> Vec<Trekning> {
+    match v {
+        Value::Array(liste) => liste.iter().filter_map(|e| tolk_trekning(e, spill)).collect(),
+        Value::Object(kart) => {
+            if let Some(Value::Array(liste)) = kart.get("draws") {
+                liste.iter().filter_map(|e| tolk_trekning(e, spill)).collect()
+            } else {
+                tolk_trekning(v, spill).into_iter().collect()
+            }
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Tolk et API-svar til en trekning, tolerant for ulike feltnavn.
@@ -297,7 +466,7 @@ pub fn tolk_trekning(v: &Value, spill: Spill) -> Option<Trekning> {
     let dato = finn_dato(v)?;
     let hovedtall = finn_tall_serie(
         v,
-        &["winningNumbers", "mainNumbers", "vinnertall", "hovedtall", "numbers"],
+        &["winningNumbers", "mainNumbers", "vinnertall", "hovedtall", "primary", "numbers"],
     )?;
     if hovedtall.len() < spill.hovedtall_antall() {
         return None;
@@ -307,7 +476,7 @@ pub fn tolk_trekning(v: &Value, spill: Spill) -> Option<Trekning> {
         &[
             "vikingNumbers", "vikingNumber", "vikingtall",
             "starNumbers", "euroNumbers", "stjernetall",
-            "additionalNumbers", "bonusNumbers", "tilleggstall",
+            "additionalNumbers", "bonusNumbers", "tilleggstall", "secondary",
         ],
     )
     .unwrap_or_default();
@@ -369,7 +538,7 @@ fn finn_tall_serie(v: &Value, nokler: &[&str]) -> Option<Vec<u8>> {
 }
 
 fn finn_dato(v: &Value) -> Option<NaiveDate> {
-    let felt = finn_felt(v, &["drawDate", "date", "trekningsdato", "drawDateTime"])?;
+    let felt = finn_felt(v, &["drawDate", "drawTime", "date", "trekningsdato", "drawDateTime"])?;
     match felt {
         Value::Number(n) => {
             let mut epoke = n.as_i64()?;
@@ -745,6 +914,42 @@ mod tester {
         let t2 = tolk_trekning(&svar2, Spill::Eurojackpot).unwrap();
         assert_eq!(t2.hovedtall, vec![7, 12, 20, 31, 45]);
         assert_eq!(t2.ekstra, vec![2, 9]);
+    }
+
+    #[test]
+    fn tolker_veikkaus_ukesvar() {
+        // Formen Veikkaus' draw-games-API svarer med: liste av trekninger,
+        // tall som strenger i results[0].primary/secondary, drawTime i ms.
+        let svar: Value = serde_json::from_str(
+            r#"[{"gameName":"EJACKPOT","status":"RESULTS_AVAILABLE",
+                 "drawTime":1770000000000,
+                 "results":[{"primary":["7","12","20","31","45"],
+                              "secondary":["2","9"]}]},
+                {"gameName":"EJACKPOT","status":"OPEN",
+                 "drawTime":1770604800000,
+                 "results":[]}]"#,
+        )
+        .unwrap();
+        let trekninger = tolk_trekninger_liste(&svar, Spill::Eurojackpot);
+        assert_eq!(trekninger.len(), 1, "åpen fremtidig trekning skal hoppes over");
+        assert_eq!(trekninger[0].hovedtall, vec![7, 12, 20, 31, 45]);
+        assert_eq!(trekninger[0].ekstra, vec![2, 9]);
+
+        // Objekt med draws-liste skal også tolkes.
+        let pakket: Value = serde_json::from_str(
+            r#"{"draws":[{"drawTime":1770000000000,
+                           "results":[{"primary":["4","18","23","29","33","41"],
+                                        "secondary":["3"]}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(tolk_trekninger_liste(&pakket, Spill::Vikinglotto).len(), 1);
+
+        // URL-bygging bruker ISO-uke.
+        let url = veikkaus_uke_url("EJACKPOT", NaiveDate::from_ymd_opt(2026, 1, 2).unwrap());
+        assert_eq!(
+            url,
+            "https://www.veikkaus.fi/api/draw-games/v1/games/EJACKPOT/draws/by-week/2026-W01"
+        );
     }
 
     #[test]

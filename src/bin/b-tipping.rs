@@ -15,6 +15,7 @@ fn main() {
     let resultat = match kommando {
         Some("hent") => hent(&args[1..]),
         Some("analyse") => analyse(&args[1..]),
+        Some("sonde") => sonde(),
         _ => {
             hjelp();
             Ok(())
@@ -37,10 +38,13 @@ Bruk:
                     [--rekker N] [--fro N]
 
   hent      Last ned trekningshistorikk til CSV (standard: siste 30 år,
-            mappe data/tipping). Bruker Norsk Tippings uoffisielle
-            resultat-API — kan kreve --endepunkt hvis de endrer nettsiden.
+            mappe data/tipping). Vikinglotto/Eurojackpot hentes fra Veikkaus'
+            åpne API (fellestrekninger — samme vinnertall som hos Norsk
+            Tipping); Lotto fra Norsk Tippings uoffisielle endepunkt.
   analyse   Frekvensstatistikk over historikken + 10 foreslåtte rekker
             med lav forventet premiedeling. --fro gir reproduserbare rekker.
+  sonde     Test alle kjente endepunkt-kandidater og vis hva de svarer —
+            kjør denne hvis `hent` feiler, og del utskriften ved feilsøking.
 
 CSV-format (kan også lages for hånd fra andre kilder):
   dato;hovedtall;ekstra          f.eks.  2026-01-03;2,9,17,22,28,31,34;5
@@ -126,6 +130,22 @@ fn hent(args: &[String]) -> anyhow::Result<()> {
                 sti.display()
             );
         }
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+fn sonde() -> anyhow::Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let klient = reqwest::Client::builder()
+            .user_agent("b-tipping/1.0 (hobbyprosjekt; resultathistorikk)")
+            .timeout(std::time::Duration::from_secs(20))
+            .build()?;
+        println!("Tester endepunkt-kandidater …\n");
+        for (url, utfall) in tipping::sonde(&klient).await {
+            println!("{url}\n  → {utfall}\n");
+        }
+        println!("Del denne utskriften ved feilsøking, så kan riktig kilde velges.");
         Ok::<(), anyhow::Error>(())
     })
 }

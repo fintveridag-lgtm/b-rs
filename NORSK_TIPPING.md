@@ -37,10 +37,18 @@ Det analysen gir deg:
   Vikinglotto 1 : 61 mill, Eurojackpot 1 : 140 mill) og forventet tap
   (~50 kr per 100 kr spilt) skrives øverst i hver kjøring.
 
-Datahentingen bruker Norsk Tippings **uoffisielle** resultat-endepunkt
-(`/api-{spill}/getResultInfo.json?drawID=`) og kan slutte å virke uten
-varsel — da kan `--endepunkt` overstyre URL-malen, eller du kan legge inn
-CSV manuelt (`dato;hovedtall;ekstra`, tall kommaseparert) i `data/tipping/`.
+Datahentingen prøver kilder i rekkefølge til én svarer:
+
+1. **Veikkaus** (Finlands spillselskap) sitt åpne resultat-API — Vikinglotto
+   og Eurojackpot er fellestrekninger på tvers av landene, så vinnertallene
+   er identiske med Norsk Tippings. Gjelder ikke norsk Lotto.
+2. **Norsk Tippings uoffisielle** endepunkt
+   (`/api-{spill}/getResultInfo.json?drawID=`) — lagt ned per 2026, men
+   beholdt som reserve; `--endepunkt` kan overstyre URL-malen.
+
+Feiler alt: kjør `b-tipping sonde` (tester alle kandidatene og viser hva de
+svarer), eller legg inn CSV manuelt (`dato;hovedtall;ekstra`, tall
+kommaseparert) i `data/tipping/`.
 
 > Merk regelendringer i historikken: Vikinglottos vikingtall var 1 av 8 før
 > 2017 (nå 1 av 5), og Eurojackpots stjernetall 2 av 10 før mars 2022 (nå
