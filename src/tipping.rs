@@ -230,11 +230,27 @@ impl Spill {
     }
 }
 
+/// Base-URL-kandidater for Veikkaus, prøvd i rekkefølge. `draw-results` er
+/// dagens API; `draw-games` var forgjengeren.
+pub const VEIKKAUS_BASER: [&str; 2] = [
+    "https://www.veikkaus.fi/api/draw-results/v1",
+    "https://www.veikkaus.fi/api/draw-games/v1",
+];
+
+/// Sonde-kandidater for Norsk Tippings *nye* API (brukes kun av `sonde`,
+/// siden sidestrukturen deres er ukjent — utskriften avslører hva som finnes).
+pub const NT_SONDE_KANDIDATER: [&str; 3] = [
+    "https://api.norsk-tipping.no/DrawGameResultsAPI/v1/api/results/{spill}/latest",
+    "https://www.norsk-tipping.no/api/results/v1/{spill}/latest",
+    "https://www.norsk-tipping.no/api/draw-results/v1/games/{spill}/draws",
+];
+
 /// URL for én ISO-uke i Veikkaus-API-et.
-pub fn veikkaus_uke_url(spillnavn: &str, dato: NaiveDate) -> String {
+pub fn veikkaus_uke_url(base: &str, spillnavn: &str, dato: NaiveDate) -> String {
     let uke = dato.iso_week();
     format!(
-        "https://www.veikkaus.fi/api/draw-games/v1/games/{}/draws/by-week/{}-W{:02}",
+        "{}/games/{}/draws/by-week/{}-W{:02}",
+        base,
         spillnavn,
         uke.year(),
         uke.week()
@@ -256,10 +272,12 @@ pub async fn hent_historikk(
     }
     let mut feil: Vec<String> = Vec::new();
     for navn in spill.veikkaus_navn() {
-        match hent_veikkaus(klient, spill, navn, fra_dato, &fremdrift).await {
-            Ok(t) if !t.is_empty() => return Ok(t),
-            Ok(_) => feil.push(format!("Veikkaus {navn}: ingen trekninger i svarene")),
-            Err(e) => feil.push(format!("Veikkaus {navn}: {e:#}")),
+        for base in VEIKKAUS_BASER {
+            match hent_veikkaus(klient, spill, base, navn, fra_dato, &fremdrift).await {
+                Ok(t) if !t.is_empty() => return Ok(t),
+                Ok(_) => feil.push(format!("Veikkaus {navn} ({base}): ingen trekninger")),
+                Err(e) => feil.push(format!("Veikkaus {navn} ({base}): {e:#}")),
+            }
         }
     }
     for mal in NT_MALER {
@@ -281,6 +299,7 @@ pub async fn hent_historikk(
 async fn hent_veikkaus(
     klient: &reqwest::Client,
     spill: Spill,
+    base: &str,
     spillnavn: &str,
     fra_dato: NaiveDate,
     fremdrift: &impl Fn(usize, NaiveDate),
@@ -289,7 +308,7 @@ async fn hent_veikkaus(
     let mut dato = chrono::Local::now().date_naive();
     let mut tomme_paa_rad = 0usize;
     // Første uken må svare — ellers er kilden/navnet feil, og vi gir oss raskt.
-    let forste_url = veikkaus_uke_url(spillnavn, dato);
+    let forste_url = veikkaus_uke_url(base, spillnavn, dato);
     let forste = hent_json(klient, &forste_url)
         .await
         .with_context(|| format!("fikk ikke kontakt med Veikkaus ({forste_url})"))?;
@@ -299,7 +318,7 @@ async fn hent_veikkaus(
     dato -= chrono::Duration::weeks(1);
 
     while dato >= fra_dato && tomme_paa_rad < 26 {
-        match hent_json(klient, &veikkaus_uke_url(spillnavn, dato)).await {
+        match hent_json(klient, &veikkaus_uke_url(base, spillnavn, dato)).await {
             Ok(v) => {
                 let ny = tolk_trekninger_liste(&v, spill);
                 if ny.is_empty() {
@@ -392,10 +411,17 @@ pub async fn sonde(klient: &reqwest::Client) -> Vec<(String, String)> {
     let idag = chrono::Local::now().date_naive();
     for spill in Spill::ALLE {
         for navn in spill.veikkaus_navn() {
-            urler.push(veikkaus_uke_url(navn, idag));
+            for base in VEIKKAUS_BASER {
+                urler.push(veikkaus_uke_url(base, navn, idag));
+            }
+            // Uten by-week: avslører om basen finnes og hvordan svaret ser ut.
+            urler.push(format!("{}/games/{}/draws", VEIKKAUS_BASER[0], navn));
         }
         for mal in NT_MALER {
             urler.push(mal.replace("{spill}", spill.api_navn()).replace("{id}", ""));
+        }
+        for mal in NT_SONDE_KANDIDATER {
+            urler.push(mal.replace("{spill}", spill.api_navn()));
         }
     }
     urler.dedup();
@@ -944,11 +970,15 @@ mod tester {
         .unwrap();
         assert_eq!(tolk_trekninger_liste(&pakket, Spill::Vikinglotto).len(), 1);
 
-        // URL-bygging bruker ISO-uke.
-        let url = veikkaus_uke_url("EJACKPOT", NaiveDate::from_ymd_opt(2026, 1, 2).unwrap());
+        // URL-bygging bruker ISO-uke, og draw-results-basen kommer først.
+        let url = veikkaus_uke_url(
+            VEIKKAUS_BASER[0],
+            "EJACKPOT",
+            NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
+        );
         assert_eq!(
             url,
-            "https://www.veikkaus.fi/api/draw-games/v1/games/EJACKPOT/draws/by-week/2026-W01"
+            "https://www.veikkaus.fi/api/draw-results/v1/games/EJACKPOT/draws/by-week/2026-W01"
         );
     }
 
