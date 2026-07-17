@@ -1,0 +1,235 @@
+//! b-tipping — trekningshistorikk og ærlig lotterianalyse for Norsk Tipping.
+//!
+//! `hent` laster ned historikk (Lotto, Vikinglotto, Eurojackpot) til CSV,
+//! `analyse` viser frekvensstatistikk og genererer «de 10 beste rekkene» —
+//! der «best» ærlig talt betyr *lavest forventet premiedeling*, siden ingen
+//! rekke har bedre vinnersjanse enn andre.
+
+use b_rs::tipping::{self, Spill};
+use chrono::{Datelike, NaiveDate};
+use std::path::PathBuf;
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let kommando = args.first().map(String::as_str);
+    let resultat = match kommando {
+        Some("hent") => hent(&args[1..]),
+        Some("analyse") => analyse(&args[1..]),
+        _ => {
+            hjelp();
+            Ok(())
+        }
+    };
+    if let Err(e) = resultat {
+        eprintln!("Feil: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn hjelp() {
+    println!(
+        "b-tipping — trekningshistorikk og ærlig lotterianalyse
+
+Bruk:
+  b-tipping hent    [lotto|vikinglotto|eurojackpot|alle] [--fra-aar ÅÅÅÅ]
+                    [--mappe STI] [--endepunkt URL-MAL]
+  b-tipping analyse [lotto|vikinglotto|eurojackpot|alle] [--mappe STI]
+                    [--rekker N] [--fro N]
+
+  hent      Last ned trekningshistorikk til CSV (standard: siste 30 år,
+            mappe data/tipping). Bruker Norsk Tippings uoffisielle
+            resultat-API — kan kreve --endepunkt hvis de endrer nettsiden.
+  analyse   Frekvensstatistikk over historikken + 10 foreslåtte rekker
+            med lav forventet premiedeling. --fro gir reproduserbare rekker.
+
+CSV-format (kan også lages for hånd fra andre kilder):
+  dato;hovedtall;ekstra          f.eks.  2026-01-03;2,9,17,22,28,31,34;5
+
+Ærlig påminnelse: alle rekker har nøyaktig samme vinnersjanse, og
+historikk kan ikke forutsi neste trekning."
+    );
+}
+
+struct Valg {
+    spill: Vec<Spill>,
+    mappe: PathBuf,
+    fra_aar: i32,
+    endepunkt: Option<String>,
+    rekker: usize,
+    fro: u64,
+}
+
+fn tolk_valg(args: &[String]) -> anyhow::Result<Valg> {
+    let naa = chrono::Local::now().date_naive();
+    let mut valg = Valg {
+        spill: Spill::ALLE.to_vec(),
+        mappe: PathBuf::from("data/tipping"),
+        fra_aar: naa.year() - 30,
+        endepunkt: None,
+        rekker: 10,
+        fro: naa.num_days_from_ce() as u64, // nytt frø hver dag, men stabilt innen dagen
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        let verdi = |i: &mut usize| -> anyhow::Result<String> {
+            *i += 1;
+            args.get(*i).cloned().ok_or_else(|| anyhow::anyhow!("{a} mangler verdi"))
+        };
+        match a.as_str() {
+            "--mappe" => valg.mappe = PathBuf::from(verdi(&mut i)?),
+            "--fra-aar" => valg.fra_aar = verdi(&mut i)?.parse()?,
+            "--endepunkt" => valg.endepunkt = Some(verdi(&mut i)?),
+            "--rekker" => valg.rekker = verdi(&mut i)?.parse()?,
+            "--fro" | "--frø" => valg.fro = verdi(&mut i)?.parse()?,
+            "alle" => valg.spill = Spill::ALLE.to_vec(),
+            navn => match Spill::fra_navn(navn) {
+                Some(s) => valg.spill = vec![s],
+                None => anyhow::bail!("ukjent spill/flagg: {navn} (prøv `b-tipping` for hjelp)"),
+            },
+        }
+        i += 1;
+    }
+    Ok(valg)
+}
+
+fn hent(args: &[String]) -> anyhow::Result<()> {
+    let valg = tolk_valg(args)?;
+    let fra_dato = NaiveDate::from_ymd_opt(valg.fra_aar, 1, 1).unwrap();
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let klient = reqwest::Client::builder()
+            .user_agent("b-tipping/1.0 (hobbyprosjekt; resultathistorikk)")
+            .timeout(std::time::Duration::from_secs(20))
+            .build()?;
+        for spill in &valg.spill {
+            println!("Henter {} fra {} og fremover …", spill.navn(), fra_dato);
+            let trekninger = tipping::hent_historikk(
+                &klient,
+                *spill,
+                fra_dato,
+                valg.endepunkt.as_deref(),
+                |antall, dato| {
+                    if antall % 50 == 0 {
+                        eprintln!("  … {antall} trekninger, kommet til {dato}");
+                    }
+                },
+            )
+            .await?;
+            let sti = tipping::csv_sti(&valg.mappe, *spill);
+            tipping::skriv_csv(&sti, &trekninger)?;
+            println!(
+                "  {} trekninger ({} – {}) lagret i {}",
+                trekninger.len(),
+                trekninger.first().unwrap().dato,
+                trekninger.last().unwrap().dato,
+                sti.display()
+            );
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+fn analyse(args: &[String]) -> anyhow::Result<()> {
+    let valg = tolk_valg(args)?;
+    println!(
+        "╔══════════════════════════════════════════════════════════════════════╗
+║  ÆRLIG PÅMINNELSE FØRST                                              ║
+║  • Alle rekker har NØYAKTIG samme vinnersjanse — alltid.             ║
+║  • Historikken under kan ikke forutsi neste trekning.                ║
+║  • Ca. halvparten av innsatsen betales tilbake: forventet tap er     ║
+║    ~50 kr per 100 kr spilt. Dette er underholdning, ikke sparing.    ║
+║  • «Beste rekker» = rekker FÅ ANDRE spiller: vinner du, deler du     ║
+║    potten med færrest mulig. Det er alt som kan optimaliseres.       ║
+╚══════════════════════════════════════════════════════════════════════╝"
+    );
+
+    for spill in &valg.spill {
+        let odds = spill.kombinasjoner();
+        println!("\n━━━ {} — 1 : {} per rekke ━━━", spill.navn(), med_skilletegn(odds));
+
+        // Statistikkdelen krever nedlastet historikk; rekkene gjør ikke.
+        let sti = tipping::csv_sti(&valg.mappe, *spill);
+        match tipping::les_csv(&sti) {
+            Ok(trekninger) if !trekninger.is_empty() => {
+                let a = tipping::analyser(*spill, &trekninger)?;
+                println!(
+                    "Historikk: {} trekninger, {} – {}",
+                    a.antall_trekninger, a.forste, a.siste
+                );
+                let mut etter_antall = a.hovedtall.clone();
+                etter_antall.sort_by(|x, y| y.antall.cmp(&x.antall));
+                let topp: Vec<String> = etter_antall
+                    .iter()
+                    .take(10)
+                    .map(|s| format!("{} ({}×)", s.tall, s.antall))
+                    .collect();
+                let bunn: Vec<String> = etter_antall
+                    .iter()
+                    .rev()
+                    .take(10)
+                    .map(|s| format!("{} ({}×)", s.tall, s.antall))
+                    .collect();
+                println!("Oftest trukket:   {}", topp.join("  "));
+                println!("Sjeldnest trukket: {}", bunn.join("  "));
+                let maks_z = a
+                    .hovedtall
+                    .iter()
+                    .map(|s| s.z.abs())
+                    .fold(0.0f64, f64::max);
+                println!(
+                    "Chi-kvadrat {:.1} (df {}, største avvik {:.1}σ): {}",
+                    a.chi2,
+                    a.chi2_frihetsgrader,
+                    maks_z,
+                    if a.innenfor_tilfeldighet {
+                        "helt forenlig med ren tilfeldighet — «varme» og «kalde» tall er støy"
+                    } else {
+                        "større avvik enn ventet — sjekk datakvaliteten før du tolker noe"
+                    }
+                );
+            }
+            _ => {
+                println!(
+                    "(Ingen historikk i {} — kjør `b-tipping hent` først, eller legg\n inn CSV manuelt. Rekkene under er uansett gyldige: de bygger ikke på\n historikk, for historikk kan ikke forbedre vinnersjansen.)",
+                    sti.display()
+                );
+            }
+        }
+
+        println!("\nDe {} beste rekkene (lavest forventet premiedeling):", valg.rekker);
+        for (i, r) in tipping::beste_rekker(*spill, valg.rekker, valg.fro).iter().enumerate() {
+            let hoved: Vec<String> = r.hovedtall.iter().map(|t| format!("{t:>2}")).collect();
+            let ekstra = if r.ekstra.is_empty() {
+                String::new()
+            } else {
+                let e: Vec<String> = r.ekstra.iter().map(u8::to_string).collect();
+                format!("  +[{}]", e.join(","))
+            };
+            println!(
+                "  {:>2}. {}{}   ({})",
+                i + 1,
+                hoved.join(" "),
+                ekstra,
+                r.begrunnelse
+            );
+        }
+    }
+
+    println!(
+        "\nSpiller du, så sett grenser hos Norsk Tipping først. Kjenner du at det\ntar overhånd: Hjelpelinjen 800 800 40 — gratis og anonymt."
+    );
+    Ok(())
+}
+
+fn med_skilletegn(n: u128) -> String {
+    let s = n.to_string();
+    let mut ut = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            ut.push(' ');
+        }
+        ut.push(c);
+    }
+    ut
+}

@@ -1,11 +1,43 @@
 # Norsk Tipping-prosjektet
 
-Et idé- og plandokument for en **Norsk Tipping-modul** i b-rs: et verktøy for å
-følge med på spill, trekninger og eget forbruk hos Norsk Tipping — med samme
-filosofi som resten av appen: **ærlige tall, harde grenser og full oversikt**.
+En **Norsk Tipping-modul** i b-rs: verktøy for å følge med på spill, trekninger
+og eget forbruk hos Norsk Tipping — med samme filosofi som resten av appen:
+**ærlige tall, harde grenser og full oversikt**.
 
-> ⚠️ Dette er et plandokument, ikke ferdig funksjonalitet. Ingenting av dette
-> er implementert ennå.
+## `b-tipping` — historikk og ærlig analyse (implementert)
+
+Et eget kommandolinjeprogram som henter trekningshistorikk for **Lotto,
+Vikinglotto og Eurojackpot** (inntil 30 år tilbake) og analyserer den:
+
+```bash
+cargo run --bin b-tipping -- hent            # last ned historikk til data/tipping/
+cargo run --bin b-tipping -- analyse         # statistikk + 10 foreslåtte rekker
+cargo run --bin b-tipping -- analyse lotto --rekker 10 --fro 42
+```
+
+Det analysen gir deg:
+
+- **Frekvensstatistikk**: hvilke tall som er trukket oftest/sjeldnest, med
+  z-score per tall og en **chi-kvadrat-test** som (nesten alltid) viser at
+  avvikene er helt forenlige med ren tilfeldighet — «varme» tall er støy.
+- **«De 10 beste rekkene»** — med den eneste ærlige definisjonen av «best»:
+  alle rekker har nøyaktig samme vinnersjanse, så det eneste som kan
+  optimaliseres er **premiedeling**. Vinner du, deler du potten med alle som
+  spilte samme rekke. Generatoren finner derfor rekker få andre spiller:
+  den unngår fødselsdagstunge tall (1–31), «lykketall», rekkefølger, like
+  sluttsiffer og andre mønstre folk faktisk fyller ut.
+- **Ærlig ramme**: vinnersjansen per spill (Lotto 1 : 5,4 mill,
+  Vikinglotto 1 : 61 mill, Eurojackpot 1 : 140 mill) og forventet tap
+  (~50 kr per 100 kr spilt) skrives øverst i hver kjøring.
+
+Datahentingen bruker Norsk Tippings **uoffisielle** resultat-endepunkt
+(`/api-{spill}/getResultInfo.json?drawID=`) og kan slutte å virke uten
+varsel — da kan `--endepunkt` overstyre URL-malen, eller du kan legge inn
+CSV manuelt (`dato;hovedtall;ekstra`, tall kommaseparert) i `data/tipping/`.
+
+> Merk regelendringer i historikken: Vikinglottos vikingtall var 1 av 8 før
+> 2017 (nå 1 av 5), og Eurojackpots stjernetall 2 av 10 før mars 2022 (nå
+> 2 av 12). Statistikken telles mot dagens verdiområde.
 
 ## Hva er Norsk Tipping?
 
@@ -85,10 +117,11 @@ merket, og isolert fra handelsmotoren.
 
 ## Status
 
-- [ ] Avklare hvilke endepunkter for trekningsresultater som er stabile nok
-- [ ] `[tipping]`-seksjon i konfig + `src/tipping.rs` med resultathenting
+- [x] `src/tipping.rs` med resultathenting, CSV-lager og analyse
+- [x] `b-tipping`-binær: `hent` + `analyse` med frekvensstatistikk,
+      chi-kvadrat og rekkegenerator (lav premiedeling)
 - [ ] Budsjett og forbruksføring i `store` + GUI-fane
-- [ ] Varsler via `notify`
+- [ ] Varsler via `notify` ved trekningsresultat
 
 Som resten av b-rs: dette er et hobbyverktøy. Det gir ikke spilleråd, og
 forventningsverdien i lotterispill er alltid negativ.

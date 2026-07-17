@@ -1,0 +1,809 @@
+//! Norsk Tipping-modul: trekningshistorikk og ærlig lotterianalyse.
+//!
+//! Viktig premiss: hver trekning er uavhengig, og alle rekker har nøyaktig
+//! samme vinnersjanse. Historikk kan aldri forutsi neste trekning. Det eneste
+//! en spiller faktisk kan påvirke, er *premiedeling*: potten deles mellom alle
+//! som har samme rekke, så en rekke få andre spiller gir høyere forventet
+//! utbetaling *hvis* den først vinner. «Beste rekker» her betyr derfor
+//! upopulære, mønsterfrie rekker — aldri «tall som skal trekkes».
+//!
+//! Datahenting bruker Norsk Tippings uoffisielle resultat-endepunkt
+//! (`/api-{spill}/getResultInfo.json?drawID=`), samme som flere åpne
+//! kildekode-prosjekter har brukt. Det kan endres uten varsel; derfor kan
+//! endepunktmalen overstyres, og alt lagres lokalt som CSV så analysen
+//! fungerer uten nett.
+
+use anyhow::{anyhow, bail, Context, Result};
+use chrono::NaiveDate;
+use serde_json::Value;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// Spillene analysen støtter, med dagens regler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spill {
+    /// 7 av 34 (uendret siden starten i 1986).
+    Lotto,
+    /// 6 av 48 + 1 vikingtall av 5 (før 2017 var vikingtallet 1 av 8).
+    Vikinglotto,
+    /// 5 av 50 + 2 stjernetall av 12 (før mars 2022: 2 av 10).
+    Eurojackpot,
+}
+
+impl Spill {
+    pub const ALLE: [Spill; 3] = [Spill::Lotto, Spill::Vikinglotto, Spill::Eurojackpot];
+
+    pub fn navn(self) -> &'static str {
+        match self {
+            Spill::Lotto => "Lotto",
+            Spill::Vikinglotto => "Vikinglotto",
+            Spill::Eurojackpot => "Eurojackpot",
+        }
+    }
+
+    /// Navnet i API-stier og filnavn.
+    pub fn api_navn(self) -> &'static str {
+        match self {
+            Spill::Lotto => "lotto",
+            Spill::Vikinglotto => "vikinglotto",
+            Spill::Eurojackpot => "eurojackpot",
+        }
+    }
+
+    pub fn fra_navn(s: &str) -> Option<Spill> {
+        match s.to_lowercase().as_str() {
+            "lotto" => Some(Spill::Lotto),
+            "vikinglotto" | "viking" => Some(Spill::Vikinglotto),
+            "eurojackpot" | "euro" => Some(Spill::Eurojackpot),
+            _ => None,
+        }
+    }
+
+    /// Antall hovedtall spilleren velger.
+    pub fn hovedtall_antall(self) -> usize {
+        match self {
+            Spill::Lotto => 7,
+            Spill::Vikinglotto => 6,
+            Spill::Eurojackpot => 5,
+        }
+    }
+
+    /// Høyeste hovedtall (1..=maks).
+    pub fn hovedtall_maks(self) -> u8 {
+        match self {
+            Spill::Lotto => 34,
+            Spill::Vikinglotto => 48,
+            Spill::Eurojackpot => 50,
+        }
+    }
+
+    /// Antall ekstratall spilleren velger (vikingtall/stjernetall).
+    /// Lottos tilleggstall trekkes av maskinen og velges ikke av spilleren.
+    pub fn ekstra_antall(self) -> usize {
+        match self {
+            Spill::Lotto => 0,
+            Spill::Vikinglotto => 1,
+            Spill::Eurojackpot => 2,
+        }
+    }
+
+    /// Høyeste ekstratall (1..=maks); 0 der spilleren ikke velger ekstratall.
+    pub fn ekstra_maks(self) -> u8 {
+        match self {
+            Spill::Lotto => 0,
+            Spill::Vikinglotto => 5,
+            Spill::Eurojackpot => 12,
+        }
+    }
+
+    /// Antall mulige rekker = 1/vinnersjansen for førstepremien.
+    pub fn kombinasjoner(self) -> u128 {
+        let hoved = kombinasjoner(self.hovedtall_maks() as u128, self.hovedtall_antall() as u128);
+        let ekstra = if self.ekstra_antall() == 0 {
+            1
+        } else {
+            kombinasjoner(self.ekstra_maks() as u128, self.ekstra_antall() as u128)
+        };
+        hoved * ekstra
+    }
+
+    /// Omtrentlig andel av innsatsen som går tilbake til spillerne.
+    pub fn tilbakebetaling(self) -> f64 {
+        // Norsk Tippings lotterispill betaler ca. halvparten tilbake i premier.
+        0.5
+    }
+}
+
+/// «n over k» — antall måter å velge k av n.
+pub fn kombinasjoner(n: u128, k: u128) -> u128 {
+    if k > n {
+        return 0;
+    }
+    let k = k.min(n - k);
+    let mut resultat: u128 = 1;
+    for i in 0..k {
+        resultat = resultat * (n - i) / (i + 1);
+    }
+    resultat
+}
+
+/// Én trekning slik den lagres lokalt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trekning {
+    pub dato: NaiveDate,
+    pub hovedtall: Vec<u8>,
+    /// Vikingtall, stjernetall eller Lottos tilleggstall — det dataene gir.
+    pub ekstra: Vec<u8>,
+}
+
+// ───────────────────────────── CSV-lager ─────────────────────────────
+
+/// Filsti for et spills historikk under datamappen.
+pub fn csv_sti(mappe: &Path, spill: Spill) -> PathBuf {
+    mappe.join(format!("{}.csv", spill.api_navn()))
+}
+
+/// Skriv historikken som CSV: `dato;hovedtall;ekstra` (tall kommaseparert).
+pub fn skriv_csv(sti: &Path, trekninger: &[Trekning]) -> Result<()> {
+    if let Some(forelder) = sti.parent() {
+        std::fs::create_dir_all(forelder)?;
+    }
+    let mut ut = String::from("dato;hovedtall;ekstra\n");
+    for t in trekninger {
+        let hoved: Vec<String> = t.hovedtall.iter().map(|n| n.to_string()).collect();
+        let ekstra: Vec<String> = t.ekstra.iter().map(|n| n.to_string()).collect();
+        ut.push_str(&format!(
+            "{};{};{}\n",
+            t.dato.format("%Y-%m-%d"),
+            hoved.join(","),
+            ekstra.join(",")
+        ));
+    }
+    std::fs::write(sti, ut).with_context(|| format!("kunne ikke skrive {}", sti.display()))
+}
+
+/// Les historikk fra CSV; ukjente/ødelagte linjer hoppes over med telling.
+pub fn les_csv(sti: &Path) -> Result<Vec<Trekning>> {
+    let innhold = std::fs::read_to_string(sti)
+        .with_context(|| format!("kunne ikke lese {}", sti.display()))?;
+    let mut trekninger = Vec::new();
+    for linje in innhold.lines().skip_while(|l| l.starts_with("dato") || l.starts_with('#')) {
+        let linje = linje.trim();
+        if linje.is_empty() {
+            continue;
+        }
+        let deler: Vec<&str> = linje.split(';').collect();
+        if deler.len() < 2 {
+            continue;
+        }
+        let Ok(dato) = NaiveDate::parse_from_str(deler[0], "%Y-%m-%d") else {
+            continue;
+        };
+        let hovedtall = tall_liste(deler[1]);
+        let ekstra = if deler.len() > 2 { tall_liste(deler[2]) } else { Vec::new() };
+        if hovedtall.is_empty() {
+            continue;
+        }
+        trekninger.push(Trekning { dato, hovedtall, ekstra });
+    }
+    trekninger.sort_by_key(|t| t.dato);
+    Ok(trekninger)
+}
+
+fn tall_liste(felt: &str) -> Vec<u8> {
+    felt.split(',')
+        .filter_map(|d| d.trim().parse::<u8>().ok())
+        .collect()
+}
+
+// ─────────────────────── Henting fra Norsk Tipping ───────────────────────
+
+/// Standard endepunktmal. `{spill}` og `{id}` byttes ut; tom `{id}` gir siste
+/// trekning. Uoffisielt API — kan slutte å virke uten varsel.
+pub const ENDEPUNKT_MAL: &str =
+    "https://www.norsk-tipping.no/api-{spill}/getResultInfo.json?drawID={id}";
+
+/// Hent historikk bakover fra siste trekning til `fra_dato`.
+/// Går drawID-ene nedover; gir opp etter `maks_feil` sammenhengende feil.
+pub async fn hent_historikk(
+    klient: &reqwest::Client,
+    spill: Spill,
+    fra_dato: NaiveDate,
+    endepunkt_mal: Option<&str>,
+    fremdrift: impl Fn(usize, NaiveDate),
+) -> Result<Vec<Trekning>> {
+    let mal = endepunkt_mal.unwrap_or(ENDEPUNKT_MAL);
+    let url_for = |id: Option<u64>| {
+        mal.replace("{spill}", spill.api_navn())
+            .replace("{id}", &id.map(|i| i.to_string()).unwrap_or_default())
+    };
+
+    // Siste trekning forteller oss høyeste drawID.
+    let siste = hent_json(klient, &url_for(None)).await.with_context(|| {
+        format!(
+            "fikk ikke kontakt med resultat-API-et for {} — endepunktet er uoffisielt \
+             og kan være endret; prøv --endepunkt med ny URL-mal",
+            spill.navn()
+        )
+    })?;
+    let siste_id = finn_tall_felt(&siste, &["drawID", "drawId", "drawNumber", "trekningsnummer"])
+        .ok_or_else(|| anyhow!("fant ikke drawID i svaret fra API-et"))? as u64;
+
+    let mut trekninger = Vec::new();
+    if let Some(t) = tolk_trekning(&siste, spill) {
+        trekninger.push(t);
+    }
+
+    let maks_feil = 10usize;
+    let mut feil_paa_rad = 0usize;
+    let mut id = siste_id;
+    while id > 1 {
+        id -= 1;
+        match hent_json(klient, &url_for(Some(id))).await.ok().and_then(|v| tolk_trekning(&v, spill)) {
+            Some(t) => {
+                feil_paa_rad = 0;
+                let dato = t.dato;
+                trekninger.push(t);
+                fremdrift(trekninger.len(), dato);
+                if dato < fra_dato {
+                    break;
+                }
+            }
+            None => {
+                feil_paa_rad += 1;
+                if feil_paa_rad >= maks_feil {
+                    break;
+                }
+            }
+        }
+        // Vær høflig mot serveren.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+
+    trekninger.retain(|t| t.dato >= fra_dato);
+    trekninger.sort_by_key(|t| t.dato);
+    trekninger.dedup_by_key(|t| t.dato);
+    if trekninger.is_empty() {
+        bail!("ingen trekninger hentet for {}", spill.navn());
+    }
+    Ok(trekninger)
+}
+
+async fn hent_json(klient: &reqwest::Client, url: &str) -> Result<Value> {
+    let tekst = klient
+        .get(url)
+        .header("Accept", "application/json")
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    // API-et har historisk lagt `while(true);/* 0;` og `/* */` foran JSON-en.
+    let renset = tekst
+        .trim_start_matches("while(true);")
+        .trim_start_matches("/* 0;")
+        .trim_start_matches("/* */")
+        .trim();
+    // Siste utvei: klipp fra første '{' til siste '}'.
+    let json_del = match (renset.find('{'), renset.rfind('}')) {
+        (Some(fra), Some(til)) if til > fra => &renset[fra..=til],
+        _ => renset,
+    };
+    Ok(serde_json::from_str(json_del)?)
+}
+
+/// Tolk et API-svar til en trekning, tolerant for ulike feltnavn.
+pub fn tolk_trekning(v: &Value, spill: Spill) -> Option<Trekning> {
+    let dato = finn_dato(v)?;
+    let hovedtall = finn_tall_serie(
+        v,
+        &["winningNumbers", "mainNumbers", "vinnertall", "hovedtall", "numbers"],
+    )?;
+    if hovedtall.len() < spill.hovedtall_antall() {
+        return None;
+    }
+    let ekstra = finn_tall_serie(
+        v,
+        &[
+            "vikingNumbers", "vikingNumber", "vikingtall",
+            "starNumbers", "euroNumbers", "stjernetall",
+            "additionalNumbers", "bonusNumbers", "tilleggstall",
+        ],
+    )
+    .unwrap_or_default();
+    let mut hovedtall: Vec<u8> = hovedtall
+        .into_iter()
+        .take(spill.hovedtall_antall())
+        .collect();
+    hovedtall.sort_unstable();
+    Some(Trekning { dato, hovedtall, ekstra })
+}
+
+/// Let rekursivt etter første felt med et av navnene.
+fn finn_felt<'a>(v: &'a Value, nokler: &[&str]) -> Option<&'a Value> {
+    match v {
+        Value::Object(kart) => {
+            for (k, verdi) in kart {
+                if nokler.iter().any(|n| n.eq_ignore_ascii_case(k)) {
+                    return Some(verdi);
+                }
+            }
+            kart.values().find_map(|verdi| finn_felt(verdi, nokler))
+        }
+        Value::Array(liste) => liste.iter().find_map(|verdi| finn_felt(verdi, nokler)),
+        _ => None,
+    }
+}
+
+fn finn_tall_felt(v: &Value, nokler: &[&str]) -> Option<i64> {
+    match finn_felt(v, nokler)? {
+        Value::Number(n) => n.as_i64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// Tolk et felt som en liste av tall: `[1,2,3]`, `["1","2"]`, `"1,2,3"` eller ett tall.
+fn finn_tall_serie(v: &Value, nokler: &[&str]) -> Option<Vec<u8>> {
+    let felt = finn_felt(v, nokler)?;
+    let tall = match felt {
+        Value::Array(liste) => liste
+            .iter()
+            .filter_map(|e| match e {
+                Value::Number(n) => n.as_u64().map(|x| x as u8),
+                Value::String(s) => s.trim().parse().ok(),
+                // Noen varianter pakker tallet inn: {"number": 7}
+                Value::Object(_) => finn_tall_felt(e, &["number", "value", "tall"]).map(|x| x as u8),
+                _ => None,
+            })
+            .collect(),
+        Value::String(s) => tall_liste(s),
+        Value::Number(n) => n.as_u64().map(|x| vec![x as u8]).unwrap_or_default(),
+        _ => return None,
+    };
+    if tall.is_empty() {
+        None
+    } else {
+        Some(tall)
+    }
+}
+
+fn finn_dato(v: &Value) -> Option<NaiveDate> {
+    let felt = finn_felt(v, &["drawDate", "date", "trekningsdato", "drawDateTime"])?;
+    match felt {
+        Value::Number(n) => {
+            let mut epoke = n.as_i64()?;
+            if epoke > 100_000_000_000 {
+                epoke /= 1000; // millisekunder
+            }
+            chrono::DateTime::from_timestamp(epoke, 0).map(|dt| dt.date_naive())
+        }
+        Value::String(s) => tolk_dato_tekst(s),
+        _ => None,
+    }
+}
+
+fn tolk_dato_tekst(s: &str) -> Option<NaiveDate> {
+    let s = s.trim();
+    for format in ["%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y"] {
+        if let Ok(d) = NaiveDate::parse_from_str(s.get(..10.min(s.len()))?, format) {
+            return Some(d);
+        }
+    }
+    // ISO med klokkeslett: ta datodelen.
+    NaiveDate::parse_from_str(s.get(..10)?, "%Y-%m-%d").ok()
+}
+
+// ───────────────────────────── Analyse ─────────────────────────────
+
+/// Statistikk for ett tall.
+#[derive(Debug, Clone)]
+pub struct TallStatistikk {
+    pub tall: u8,
+    pub antall: usize,
+    pub forventet: f64,
+    /// Standardavvik fra forventet — |z| < 3 er helt normalt.
+    pub z: f64,
+    pub sist_trukket: Option<NaiveDate>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Analyse {
+    pub spill: Spill,
+    pub antall_trekninger: usize,
+    pub forste: NaiveDate,
+    pub siste: NaiveDate,
+    pub hovedtall: Vec<TallStatistikk>,
+    pub ekstra: Vec<TallStatistikk>,
+    /// Chi-kvadrat for hovedtallene mot uniform fordeling.
+    pub chi2: f64,
+    pub chi2_frihetsgrader: usize,
+    /// Sant hvis avvikene er godt innenfor det ren tilfeldighet gir.
+    pub innenfor_tilfeldighet: bool,
+}
+
+/// Tell opp historikken. Tall utenfor dagens verdiområde (fra gamle regler)
+/// ignoreres i opptellingen.
+pub fn analyser(spill: Spill, trekninger: &[Trekning]) -> Result<Analyse> {
+    if trekninger.is_empty() {
+        bail!("ingen trekninger å analysere for {}", spill.navn());
+    }
+    let maks = spill.hovedtall_maks();
+    let mut antall: BTreeMap<u8, usize> = (1..=maks).map(|t| (t, 0)).collect();
+    let mut sist: BTreeMap<u8, NaiveDate> = BTreeMap::new();
+    let mut gyldige_trekk = 0usize;
+    for t in trekninger {
+        for &tall in &t.hovedtall {
+            if (1..=maks).contains(&tall) {
+                *antall.get_mut(&tall).unwrap() += 1;
+                gyldige_trekk += 1;
+                let d = sist.entry(tall).or_insert(t.dato);
+                if t.dato > *d {
+                    *d = t.dato;
+                }
+            }
+        }
+    }
+
+    let forventet = gyldige_trekk as f64 / maks as f64;
+    // Varians for antall ganger ett bestemt tall trekkes ligner binomisk;
+    // std ≈ sqrt(forventet · (1 − k/N)).
+    let andel = spill.hovedtall_antall() as f64 / maks as f64;
+    let std = (forventet * (1.0 - andel)).sqrt().max(1e-9);
+
+    let hovedtall: Vec<TallStatistikk> = antall
+        .iter()
+        .map(|(&tall, &n)| TallStatistikk {
+            tall,
+            antall: n,
+            forventet,
+            z: (n as f64 - forventet) / std,
+            sist_trukket: sist.get(&tall).copied(),
+        })
+        .collect();
+
+    let chi2: f64 = hovedtall
+        .iter()
+        .map(|s| (s.antall as f64 - forventet).powi(2) / forventet.max(1e-9))
+        .sum();
+    let frihetsgrader = maks as usize - 1;
+    // Chi-kvadrat har snitt = df og std = sqrt(2·df); innenfor 3 std regnes
+    // som fullt forenlig med ren tilfeldighet.
+    let innenfor = chi2 < frihetsgrader as f64 + 3.0 * (2.0 * frihetsgrader as f64).sqrt();
+
+    // Samme øvelse for spillerens ekstratall (vikingtall/stjernetall).
+    let ekstra = if spill.ekstra_antall() > 0 {
+        let e_maks = spill.ekstra_maks();
+        let mut e_antall: BTreeMap<u8, usize> = (1..=e_maks).map(|t| (t, 0)).collect();
+        let mut e_sist: BTreeMap<u8, NaiveDate> = BTreeMap::new();
+        let mut e_trekk = 0usize;
+        for t in trekninger {
+            for &tall in &t.ekstra {
+                if (1..=e_maks).contains(&tall) {
+                    *e_antall.get_mut(&tall).unwrap() += 1;
+                    e_trekk += 1;
+                    let d = e_sist.entry(tall).or_insert(t.dato);
+                    if t.dato > *d {
+                        *d = t.dato;
+                    }
+                }
+            }
+        }
+        let e_forventet = e_trekk as f64 / e_maks as f64;
+        let e_andel = spill.ekstra_antall() as f64 / e_maks as f64;
+        let e_std = (e_forventet * (1.0 - e_andel)).sqrt().max(1e-9);
+        e_antall
+            .iter()
+            .map(|(&tall, &n)| TallStatistikk {
+                tall,
+                antall: n,
+                forventet: e_forventet,
+                z: (n as f64 - e_forventet) / e_std,
+                sist_trukket: e_sist.get(&tall).copied(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(Analyse {
+        spill,
+        antall_trekninger: trekninger.len(),
+        forste: trekninger.iter().map(|t| t.dato).min().unwrap(),
+        siste: trekninger.iter().map(|t| t.dato).max().unwrap(),
+        hovedtall,
+        ekstra,
+        chi2,
+        chi2_frihetsgrader: frihetsgrader,
+        innenfor_tilfeldighet: innenfor,
+    })
+}
+
+// ─────────────────────── «Beste rekker»-generatoren ───────────────────────
+
+/// En foreslått rekke med poengsum og begrunnelse.
+#[derive(Debug, Clone)]
+pub struct Rekke {
+    pub hovedtall: Vec<u8>,
+    pub ekstra: Vec<u8>,
+    /// Lavere = mer upopulær = mindre premiedeling om den vinner.
+    pub popularitet: f64,
+    pub begrunnelse: String,
+}
+
+/// Enkel, rask xorshift64* — god nok til å trekke kandidater, og frøstyrt
+/// så resultatet kan reproduseres.
+struct Rng(u64);
+
+impl Rng {
+    fn ny(fro: u64) -> Rng {
+        Rng(fro.max(1))
+    }
+    fn neste(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545F4914F6CDD1D)
+    }
+    /// Uniformt tall i 1..=maks.
+    fn tall(&mut self, maks: u8) -> u8 {
+        (self.neste() % maks as u64) as u8 + 1
+    }
+}
+
+/// Popularitetspoeng for en rekke: hvor mange andre spillere som *trolig*
+/// har den samme. Basert på velkjente funn om spilleratferd: folk spiller
+/// fødselsdager (1–31, og 1–12 dobbelt), «lykketall», mønstre og rekkefølger.
+/// Lavere er bedre.
+pub fn popularitet(hovedtall: &[u8], ekstra: &[u8], spill: Spill) -> f64 {
+    let mut poeng = 0.0;
+    let lykketall = [3u8, 7, 11, 13, 17];
+
+    for &t in hovedtall {
+        if t <= 12 {
+            poeng += 2.0; // både dag og måned i fødselsdatoer
+        } else if t <= 31 {
+            poeng += 1.0; // dag i fødselsdatoer
+        }
+        if lykketall.contains(&t) {
+            poeng += 0.5;
+        }
+    }
+
+    // Mønstre folk spiller mye: rekkefølger og tall med samme sluttsiffer.
+    let mut sortert = hovedtall.to_vec();
+    sortert.sort_unstable();
+    for par in sortert.windows(2) {
+        if par[1] == par[0] + 1 {
+            poeng += 1.5;
+        }
+    }
+    let mut sluttsiffer = [0u8; 10];
+    for &t in &sortert {
+        sluttsiffer[(t % 10) as usize] += 1;
+    }
+    for &n in &sluttsiffer {
+        if n >= 3 {
+            poeng += (n as f64 - 2.0) * 1.5;
+        }
+    }
+    // Full aritmetisk rekke (5-10-15-20-…) er ekstremt populær.
+    if sortert.len() >= 3 {
+        let diff = sortert[1] as i16 - sortert[0] as i16;
+        if sortert.windows(2).all(|p| p[1] as i16 - p[0] as i16 == diff) {
+            poeng += 10.0;
+        }
+    }
+    // Alle tall klumpet i én tiergruppe ser «valgt» ut og deles oftere.
+    let spredning = sortert.last().unwrap_or(&0) - sortert.first().unwrap_or(&0);
+    if (spredning as usize) < sortert.len() * 3 {
+        poeng += 3.0;
+    }
+
+    // Skjev paritet (bare partall / bare oddetall) er også et populært mønster.
+    let odde = sortert.iter().filter(|t| *t % 2 == 1).count();
+    let balanse = (odde as f64 - sortert.len() as f64 / 2.0).abs();
+    if balanse > 1.5 {
+        poeng += balanse;
+    }
+
+    // Ekstratall: små tall (fødselsdager/lykketall) er mest spilt.
+    for &t in ekstra {
+        if t <= 12 {
+            poeng += 0.5;
+        }
+        if lykketall.contains(&t) {
+            poeng += 0.3;
+        }
+    }
+
+    // Normaliser lett mot antall tall så spillene kan sammenlignes.
+    poeng / spill.hovedtall_antall() as f64
+}
+
+/// Generer `antall` rekker med lav forventet premiedeling. Frøstyrt og
+/// deterministisk. Rekkene tvinges til å være innbyrdes ulike
+/// (maks 2 felles hovedtall).
+pub fn beste_rekker(spill: Spill, antall: usize, fro: u64) -> Vec<Rekke> {
+    let mut rng = Rng::ny(fro);
+    let mut kandidater: Vec<(f64, Vec<u8>, Vec<u8>)> = Vec::new();
+
+    // Trekk mange tilfeldige rekker og behold de mest upopulære.
+    let forsok = 30_000;
+    for _ in 0..forsok {
+        let mut hoved = Vec::with_capacity(spill.hovedtall_antall());
+        while hoved.len() < spill.hovedtall_antall() {
+            let t = rng.tall(spill.hovedtall_maks());
+            if !hoved.contains(&t) {
+                hoved.push(t);
+            }
+        }
+        hoved.sort_unstable();
+        let mut ekstra = Vec::with_capacity(spill.ekstra_antall());
+        while ekstra.len() < spill.ekstra_antall() {
+            let t = rng.tall(spill.ekstra_maks().max(1));
+            if !ekstra.contains(&t) {
+                ekstra.push(t);
+            }
+        }
+        ekstra.sort_unstable();
+        let poeng = popularitet(&hoved, &ekstra, spill);
+        kandidater.push((poeng, hoved, ekstra));
+    }
+    kandidater.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Plukk grådig med krav om innbyrdes ulikhet.
+    let mut valgte: Vec<Rekke> = Vec::new();
+    for (poeng, hoved, ekstra) in kandidater {
+        if valgte.len() >= antall {
+            break;
+        }
+        let for_lik = valgte.iter().any(|r| {
+            r.hovedtall.iter().filter(|t| hoved.contains(t)).count() > 2
+        });
+        if for_lik {
+            continue;
+        }
+        let begrunnelse = beskriv(&hoved, spill);
+        valgte.push(Rekke { hovedtall: hoved, ekstra, popularitet: poeng, begrunnelse });
+    }
+    valgte
+}
+
+fn beskriv(hoved: &[u8], spill: Spill) -> String {
+    let over_31 = hoved.iter().filter(|t| **t > 31).count();
+    let sum: u32 = hoved.iter().map(|t| *t as u32).sum();
+    let odde = hoved.iter().filter(|t| *t % 2 == 1).count();
+    let mut deler = Vec::new();
+    if spill.hovedtall_maks() > 31 && over_31 > 0 {
+        deler.push(format!("{} tall over 31 (unngår bursdagsrekker)", over_31));
+    }
+    deler.push(format!("sum {}", sum));
+    deler.push(format!("{} odde/{} par", odde, hoved.len() - odde));
+    deler.join(", ")
+}
+
+// ───────────────────────────── Tester ─────────────────────────────
+
+#[cfg(test)]
+mod tester {
+    use super::*;
+
+    #[test]
+    fn kombinatorikk_stemmer_med_offisielle_odds() {
+        assert_eq!(kombinasjoner(34, 7), 5_379_616); // Lotto
+        assert_eq!(Spill::Lotto.kombinasjoner(), 5_379_616);
+        assert_eq!(Spill::Vikinglotto.kombinasjoner(), 61_357_560); // C(48,6)·5
+        assert_eq!(Spill::Eurojackpot.kombinasjoner(), 139_838_160); // C(50,5)·C(12,2)
+    }
+
+    #[test]
+    fn csv_rundtur() {
+        let mappe = std::env::temp_dir().join("b-tipping-test");
+        let sti = mappe.join("lotto.csv");
+        let trekninger = vec![
+            Trekning {
+                dato: NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(),
+                hovedtall: vec![2, 9, 17, 22, 28, 31, 34],
+                ekstra: vec![5],
+            },
+            Trekning {
+                dato: NaiveDate::from_ymd_opt(2026, 1, 10).unwrap(),
+                hovedtall: vec![1, 4, 12, 19, 25, 30, 33],
+                ekstra: vec![],
+            },
+        ];
+        skriv_csv(&sti, &trekninger).unwrap();
+        let lest = les_csv(&sti).unwrap();
+        assert_eq!(lest, trekninger);
+        let _ = std::fs::remove_dir_all(&mappe);
+    }
+
+    #[test]
+    fn tolker_api_svar_med_ulike_feltnavn() {
+        let svar: Value = serde_json::from_str(
+            r#"{"drawID": 1234, "drawDate": "14.06.2026",
+                "resultInfo": {"winningNumbers": ["4","18","23","29","33","41"],
+                                "vikingNumbers": [3]}}"#,
+        )
+        .unwrap();
+        let t = tolk_trekning(&svar, Spill::Vikinglotto).unwrap();
+        assert_eq!(t.dato, NaiveDate::from_ymd_opt(2026, 6, 14).unwrap());
+        assert_eq!(t.hovedtall, vec![4, 18, 23, 29, 33, 41]);
+        assert_eq!(t.ekstra, vec![3]);
+
+        // Epoke i millisekunder og tall som objekter.
+        let svar2: Value = serde_json::from_str(
+            r#"{"drawDate": 1770000000000,
+                "mainNumbers": [{"number": 7}, {"number": 12}, {"number": 20},
+                                 {"number": 31}, {"number": 45}],
+                "starNumbers": [{"number": 2}, {"number": 9}]}"#,
+        )
+        .unwrap();
+        let t2 = tolk_trekning(&svar2, Spill::Eurojackpot).unwrap();
+        assert_eq!(t2.hovedtall, vec![7, 12, 20, 31, 45]);
+        assert_eq!(t2.ekstra, vec![2, 9]);
+    }
+
+    #[test]
+    fn bursdagstung_rekke_er_mer_populaer_enn_hoy_rekke() {
+        // Klassisk «familiens fødselsdager»-rekke …
+        let bursdag = popularitet(&[3, 7, 11, 14, 21, 24, 31], &[], Spill::Lotto);
+        // … mot en spredt rekke med høye tall.
+        let hoy = popularitet(&[2, 16, 25, 28, 32, 33, 34], &[], Spill::Lotto);
+        assert!(bursdag > hoy, "bursdag={bursdag} burde være > høy={hoy}");
+        // 1-2-3-4-5-6-7 skal straffes hardt.
+        let rekkefolge = popularitet(&[1, 2, 3, 4, 5, 6, 7], &[], Spill::Lotto);
+        assert!(rekkefolge > bursdag);
+    }
+
+    #[test]
+    fn beste_rekker_er_gyldige_og_ulike() {
+        for spill in Spill::ALLE {
+            let rekker = beste_rekker(spill, 10, 42);
+            assert_eq!(rekker.len(), 10, "{}", spill.navn());
+            for r in &rekker {
+                assert_eq!(r.hovedtall.len(), spill.hovedtall_antall());
+                assert!(r.hovedtall.iter().all(|t| (1..=spill.hovedtall_maks()).contains(t)));
+                assert_eq!(r.ekstra.len(), spill.ekstra_antall());
+                assert!(r.ekstra.iter().all(|t| (1..=spill.ekstra_maks()).contains(t)));
+                // Ingen duplikater.
+                let mut h = r.hovedtall.clone();
+                h.dedup();
+                assert_eq!(h.len(), r.hovedtall.len());
+            }
+            // Innbyrdes ulikhet: maks 2 felles hovedtall.
+            for (i, a) in rekker.iter().enumerate() {
+                for b in &rekker[i + 1..] {
+                    let felles = a.hovedtall.iter().filter(|t| b.hovedtall.contains(t)).count();
+                    assert!(felles <= 2, "{}: {} felles tall", spill.navn(), felles);
+                }
+            }
+            // Samme frø → samme resultat.
+            let igjen = beste_rekker(spill, 10, 42);
+            assert_eq!(rekker[0].hovedtall, igjen[0].hovedtall);
+        }
+    }
+
+    #[test]
+    fn analyse_teller_riktig_og_chi2_er_fornuftig() {
+        // Syntetisk, jevnt fordelt historikk: hvert tall like ofte.
+        let mut trekninger = Vec::new();
+        let start = NaiveDate::from_ymd_opt(1996, 1, 6).unwrap();
+        for uke in 0..340u32 {
+            let dato = start + chrono::Duration::weeks(uke as i64);
+            let forste = (uke * 7) % 34;
+            let hovedtall: Vec<u8> = (0..7).map(|i| ((forste + i) % 34) as u8 + 1).collect();
+            trekninger.push(Trekning { dato, hovedtall, ekstra: vec![] });
+        }
+        let analyse = analyser(Spill::Lotto, &trekninger).unwrap();
+        assert_eq!(analyse.antall_trekninger, 340);
+        let sum_antall: usize = analyse.hovedtall.iter().map(|s| s.antall).sum();
+        assert_eq!(sum_antall, 340 * 7);
+        // Perfekt jevn fordeling → chi2 ≈ 0, godt innenfor tilfeldighet.
+        assert!(analyse.chi2 < 1.0);
+        assert!(analyse.innenfor_tilfeldighet);
+    }
+}

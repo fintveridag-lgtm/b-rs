@@ -16,5 +16,6 @@ pub mod risk;
 pub mod state;
 pub mod store;
 pub mod strategy;
+pub mod tipping;
 pub mod types;
 pub mod ui;

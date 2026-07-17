@@ -17,6 +17,11 @@ path = "src/main.rs"
 name = "b-rs-gui"
 path = "src/gui_main.rs"
 
+# Norsk Tipping: hent trekningshistorikk og kjør ærlig lotterianalyse.
+[[bin]]
+name = "b-tipping"
+path = "src/bin/b-tipping.rs"
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
