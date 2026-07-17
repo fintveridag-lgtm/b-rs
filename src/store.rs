@@ -427,7 +427,7 @@ impl Store {
 
 fn format_ts(raw: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(raw)
-        .map(|d| d.format("%d.%m.%Y %H:%M").to_string())
+        .map(|d| d.with_timezone(&chrono::Local).format("%d.%m.%Y %H:%M").to_string())
         .unwrap_or_else(|_| raw.to_string())
 }
 

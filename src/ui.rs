@@ -129,7 +129,7 @@ fn draw(f: &mut Frame, state: &SharedState, flags: &Arc<Flags>) {
         .take(rows[3].height.saturating_sub(2) as usize)
         .map(|(ts, msg)| {
             Line::from(vec![
-                Span::styled(format!("{} ", ts.format("%H:%M:%S")), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{} ", ts.with_timezone(&chrono::Local).format("%H:%M:%S")), Style::default().fg(Color::DarkGray)),
                 Span::raw(msg.clone()),
             ])
         })
@@ -157,7 +157,7 @@ fn draw_watchlist(f: &mut Frame, area: Rect, st: &crate::state::UiState) {
         })
         .collect();
     let title = match st.last_tick {
-        Some(ts) => format!(" Watchlist (oppdatert {}) ", ts.format("%H:%M:%S")),
+        Some(ts) => format!(" Watchlist (oppdatert {}) ", ts.with_timezone(&chrono::Local).format("%H:%M:%S")),
         None => " Watchlist (venter på data …) ".to_string(),
     };
     let table = Table::new(
@@ -236,7 +236,7 @@ fn draw_orders(f: &mut Frame, area: Rect, st: &crate::state::UiState) {
                 crate::types::Side::Sell => Color::Red,
             };
             Row::new(vec![
-                Cell::from(o.created.format("%H:%M:%S").to_string()),
+                Cell::from(o.created.with_timezone(&chrono::Local).format("%H:%M:%S").to_string()),
                 Cell::from(o.id.clone()),
                 Cell::from(Span::styled(o.side.to_string(), Style::default().fg(side_color))),
                 Cell::from(o.symbol.clone()),

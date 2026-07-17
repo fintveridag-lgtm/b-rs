@@ -508,7 +508,7 @@ impl App {
                         )
                         .on_hover_text("Appen prøver igjen automatisk hvert tikk. Sjekk nettforbindelsen hvis dette vedvarer.");
                     } else {
-                        ui.label(RichText::new(format!("oppdatert {}", ts.format("%H:%M:%S"))).color(GRAY));
+                        ui.label(RichText::new(format!("oppdatert {}", ts.with_timezone(&chrono::Local).format("%H:%M:%S"))).color(GRAY));
                     }
                 } else {
                     ui.spinner();
@@ -1526,7 +1526,7 @@ impl App {
                             }
                             ui.end_row();
                             for o in &st.orders {
-                                ui.label(o.created.format("%H:%M:%S").to_string());
+                                ui.label(o.created.with_timezone(&chrono::Local).format("%H:%M:%S").to_string());
                                 let color = match o.side {
                                     Side::Buy => GREEN,
                                     Side::Sell => RED,
@@ -1549,7 +1549,7 @@ impl App {
                     egui::ScrollArea::vertical().id_salt("logg").show(&mut cols[1], |ui| {
                         for (ts, msg) in &st.logs {
                             ui.horizontal_wrapped(|ui| {
-                                ui.label(RichText::new(ts.format("%H:%M:%S").to_string()).color(GRAY).monospace());
+                                ui.label(RichText::new(ts.with_timezone(&chrono::Local).format("%H:%M:%S").to_string()).color(GRAY).monospace());
                                 ui.label(RichText::new(msg).small());
                             });
                         }
@@ -1840,8 +1840,18 @@ impl App {
                     }
                 });
             if !self.simple_chart {
-                ui.small("Strategien sma_cross kjøper når gul (rask) krysser over blå (treg), og selger ved kryss under. Zoom med musehjulet.")
-                    .on_hover_text("SMA = gjennomsnittskursen siste N dager. Når det korte snittet krysser det lange, har retningen ofte snudd.");
+                let tf = self.settings.strategy.timeframe_min;
+                if tf > 0 {
+                    ui.small(format!(
+                        "OBS: strategien handler på egne {tf}-minutterslys — linjene her er en illustrasjon på \
+                         dags-/tikkhistorikk og krysser IKKE nødvendigvis samtidig som strategiens egne snitt. \
+                         Signalene ser du i 📜 Hendelser."
+                    ))
+                    .on_hover_text("Med tidsramme aktiv har strategien sin egen kursserie (jevne lys). Grafens SMA-linjer bygger på en annen oppløsning og er kun veiledende.");
+                } else {
+                    ui.small("Strategien sma_cross kjøper når gul (rask) krysser over blå (treg), og selger ved kryss under. Zoom med musehjulet.")
+                        .on_hover_text("SMA = gjennomsnittskursen siste N dager. Når det korte snittet krysser det lange, har retningen ofte snudd.");
+                }
             }
 
             // «Hva ser jeg?» — grafen forklart i klartekst.
@@ -1907,7 +1917,7 @@ impl App {
                 .height(equity_h - 30.0)
                 .x_axis_formatter(|mark, _range| {
                     chrono::DateTime::from_timestamp(mark.value as i64, 0)
-                        .map(|dt| dt.format("%H:%M").to_string())
+                        .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
                         .unwrap_or_default()
                 })
                 .show(ui, |plot_ui| {
@@ -2263,7 +2273,7 @@ impl App {
                     }
                     ui.end_row();
                     for o in st.orders.iter().filter(|o| self.order_filter.matches(o.status)) {
-                        ui.label(o.created.format("%H:%M:%S").to_string());
+                        ui.label(o.created.with_timezone(&chrono::Local).format("%H:%M:%S").to_string());
                         ui.label(&o.id);
                         let color = match o.side { Side::Buy => GREEN, Side::Sell => RED };
                         ui.label(RichText::new(o.side.to_string()).color(color).strong());
@@ -2938,7 +2948,7 @@ impl App {
                     ui.heading(RichText::new("🔥 Markedet").strong());
                     match st.market.updated {
                         Some(ts) => {
-                            ui.label(RichText::new(format!("oppdatert {}", ts.format("%H:%M"))).color(GRAY));
+                            ui.label(RichText::new(format!("oppdatert {}", ts.with_timezone(&chrono::Local).format("%H:%M"))).color(GRAY));
                         }
                         None => {
                             ui.spinner();
@@ -3067,7 +3077,7 @@ impl App {
                     ui.heading(RichText::new("🔮 Ukens analyse").strong());
                     match st.market.updated {
                         Some(ts) => {
-                            ui.label(RichText::new(format!("oppdatert {}", ts.format("%H:%M"))).color(GRAY));
+                            ui.label(RichText::new(format!("oppdatert {}", ts.with_timezone(&chrono::Local).format("%H:%M"))).color(GRAY));
                         }
                         None => {
                             ui.spinner();

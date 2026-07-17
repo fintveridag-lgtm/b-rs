@@ -1010,7 +1010,7 @@ impl Engine {
                 }
                 let _ = self.store.record_order(&order, self.broker.name());
                 let tx = crate::state::TxRow {
-                    ts: order.created.format("%d.%m.%Y %H:%M").to_string(),
+                    ts: order.created.with_timezone(&chrono::Local).format("%d.%m.%Y %H:%M").to_string(),
                     symbol: order.symbol.clone(),
                     side: order.side.to_string(),
                     qty: order.qty,
