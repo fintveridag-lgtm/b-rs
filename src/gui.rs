@@ -7,8 +7,8 @@ use crate::types::Side;
 use anyhow::Result;
 use eframe::egui::{self, Color32, RichText};
 use egui_plot::{
-    BoxElem, BoxPlot, BoxSpread, HLine, Legend, Line, LineStyle, MarkerShape, Plot, PlotPoints,
-    Points,
+    BoxElem, BoxPlot, BoxSpread, GridInput, GridMark, HLine, Legend, Line, LineStyle, MarkerShape,
+    Plot, PlotPoints, Points,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -1751,9 +1751,10 @@ impl App {
             Plot::new("kursgraf")
                 .height(chart_h)
                 .legend(Legend::default())
+                .x_grid_spacer(date_grid)
                 .x_axis_formatter(|mark, _range| {
                     chrono::DateTime::from_timestamp(mark.value as i64, 0)
-                        .map(|dt| dt.format("%d.%m").to_string())
+                        .map(|dt| dt.with_timezone(&chrono::Local).format("%d.%m").to_string())
                         .unwrap_or_default()
                 })
                 .label_formatter(move |name, value| {
@@ -2153,9 +2154,10 @@ impl App {
                     Plot::new("portefolje_lang")
                         .height(220.0)
                         .legend(Legend::default())
+                        .x_grid_spacer(date_grid)
                         .x_axis_formatter(|mark, _range| {
                             chrono::DateTime::from_timestamp(mark.value as i64, 0)
-                                .map(|dt| dt.format("%d.%m.%y").to_string())
+                                .map(|dt| dt.with_timezone(&chrono::Local).format("%d.%m.%y").to_string())
                                 .unwrap_or_default()
                         })
                         .show(ui, |plot_ui| {
@@ -3407,6 +3409,32 @@ impl App {
             });
         });
     }
+}
+
+/// Dato-akse: rutenettmerker ved midnatt — dag for dag når du ser noen
+/// uker, ukesvis på kvartalsvisning, månedsvis på år. Da følger aksen
+/// kalenderen i stedet for «pene» sekundtall som lander midt i døgnet.
+fn date_grid(input: GridInput) -> Vec<GridMark> {
+    const DAY: f64 = 86_400.0;
+    let (min, max) = input.bounds;
+    let span = (max - min).max(1.0);
+    let step = if span <= 40.0 * DAY {
+        DAY
+    } else if span <= 200.0 * DAY {
+        7.0 * DAY
+    } else {
+        30.0 * DAY
+    };
+    let mut marks = Vec::new();
+    let mut i = (min / step).floor() as i64;
+    while (i as f64) * step <= max {
+        let value = i as f64 * step;
+        if value >= min {
+            marks.push(GridMark { value, step_size: step });
+        }
+        i += 1;
+    }
+    marks
 }
 
 /// Enkel Markdown-visning uten ekstra avhengigheter: overskrifter, skillelinjer
