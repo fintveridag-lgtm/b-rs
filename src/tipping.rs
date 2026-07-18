@@ -597,14 +597,35 @@ pub async fn lotto_jakt(klient: &reqwest::Client) -> Vec<String> {
     // 1) Innbakt JSON i selve siden? (SSR-data inneholder ofte siste trekning.)
     for marker in [
         "__NEXT_DATA__", "winningNumbers", "mainNumbers", "vinnertall",
-        "drawDate", "drawId", "prizeLevel",
+        "umbers", "tilleggstall", "prizeLevel",
     ] {
-        for (funn, utdrag) in finn_utdrag(&html, marker, 600).into_iter().take(2) {
+        for (funn, utdrag) in finn_utdrag(&html, marker, 300).into_iter().take(2) {
             rapport.push(format!("  fant «{funn}» i HTML: …{utdrag}…"));
         }
     }
 
-    // 2) Skann JavaScript-bundlene etter API-stier med result/draw/lotto.
+    // 2) Skriv ut HELE det første trekningsobjektet — da ser vi alle feltene,
+    //    inkludert hva vinnertallene faktisk heter.
+    let renset = html.replace("\\\"", "\"");
+    if let Some(pos) = renset.find("\"drawDate\"") {
+        match objekt_rundt(&renset, pos) {
+            Some(obj) => {
+                let pen = serde_json::from_str::<Value>(obj)
+                    .and_then(|v| serde_json::to_string_pretty(&v))
+                    .unwrap_or_else(|_| obj.to_string());
+                let kuttet: String = pen.chars().take(4000).collect();
+                rapport.push(format!("Hele første trekningsobjekt:\n{kuttet}"));
+                if pen.len() > 4000 {
+                    rapport.push("  … (kuttet ved 4000 tegn)".into());
+                }
+            }
+            None => rapport.push("Fant drawDate, men klarte ikke avgrense objektet.".into()),
+        }
+    } else {
+        rapport.push("Ingen drawDate i HTML-en — trekningene lastes trolig via API.".into());
+    }
+
+    // 3) Skann JavaScript-bundlene etter API-stier med result/draw/lotto.
     let bundler = finn_js_urler(&html, side_url);
     rapport.push(format!("Fant {} JavaScript-filer, skanner alle …", bundler.len()));
     let mut kandidater: Vec<String> = Vec::new();
