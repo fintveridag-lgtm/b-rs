@@ -111,9 +111,10 @@ fn hent(args: &[String]) -> anyhow::Result<()> {
             .user_agent("b-tipping/1.0 (hobbyprosjekt; resultathistorikk)")
             .timeout(std::time::Duration::from_secs(20))
             .build()?;
+        let mut feilede: Vec<String> = Vec::new();
         for spill in &valg.spill {
             println!("Henter {} fra {} og fremover …", spill.navn(), fra_dato);
-            let trekninger = tipping::hent_historikk(
+            let resultat = tipping::hent_historikk(
                 &klient,
                 *spill,
                 fra_dato,
@@ -124,7 +125,16 @@ fn hent(args: &[String]) -> anyhow::Result<()> {
                     }
                 },
             )
-            .await?;
+            .await;
+            // Ett spill som feiler skal ikke stoppe de andre.
+            let trekninger = match resultat {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("  FEIL: {e:#}");
+                    feilede.push(spill.navn().to_string());
+                    continue;
+                }
+            };
             let sti = tipping::csv_sti(&valg.mappe, *spill);
             let (forste, siste) =
                 (trekninger.first().unwrap().dato, trekninger.last().unwrap().dato);
@@ -134,6 +144,9 @@ fn hent(args: &[String]) -> anyhow::Result<()> {
                 "  {hentet} trekninger hentet ({forste} – {siste}); {totalt} totalt i {}",
                 sti.display()
             );
+        }
+        if !feilede.is_empty() {
+            anyhow::bail!("henting feilet for: {}", feilede.join(", "));
         }
         Ok::<(), anyhow::Error>(())
     })

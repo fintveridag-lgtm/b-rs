@@ -546,33 +546,50 @@ fn objekt_rundt(tekst: &str, midt: usize) -> Option<&str> {
 }
 
 /// Hent trekninger fra Norsk Tippings resultatside (SSR-skraping).
+///
+/// Serveren har vist seg å tvangslukke aller første forespørsel fra en ny
+/// klient (os error 10054) og godta de neste — derfor eget nettleser-likt
+/// klientoppsett (én User-Agent, som i `jakt`, som virker) og gjenforsøk.
 async fn hent_nt_side(
-    klient: &reqwest::Client,
+    _klient: &reqwest::Client,
     spill: Spill,
     fra_dato: NaiveDate,
     fremdrift: &impl Fn(usize, NaiveDate),
 ) -> Result<Vec<Trekning>> {
     let url = nt_side_url(spill);
-    let html = klient
-        .get(&url)
-        .header("Accept", "text/html")
-        // Siden tvangslukker ukjente klienter; oppfør oss som en nettleser.
-        .header(
-            reqwest::header::USER_AGENT,
+    let nettleser = reqwest::Client::builder()
+        .user_agent(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
              (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
         )
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
-    let mut trekninger = trekk_ut_innbakte_trekninger(&html, spill);
-    rydd(&mut trekninger, fra_dato);
-    for t in &trekninger {
-        fremdrift(trekninger.len(), t.dato);
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let mut siste_feil = None;
+    for forsok in 0..4u64 {
+        if forsok > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(600 * forsok)).await;
+        }
+        let svar = nettleser
+            .get(&url)
+            .header("Accept", "text/html")
+            .send()
+            .await
+            .and_then(|s| s.error_for_status());
+        match svar {
+            Ok(s) => {
+                let html = s.text().await.unwrap_or_default();
+                let mut trekninger = trekk_ut_innbakte_trekninger(&html, spill);
+                rydd(&mut trekninger, fra_dato);
+                for t in &trekninger {
+                    fremdrift(trekninger.len(), t.dato);
+                }
+                return Ok(trekninger);
+            }
+            Err(e) => siste_feil = Some(e),
+        }
     }
-    Ok(trekninger)
+    Err(siste_feil.map(anyhow::Error::from).unwrap_or_else(|| anyhow!("ukjent feil")))
+        .with_context(|| format!("resultatsiden svarte ikke etter 4 forsøk ({url})"))
 }
 
 /// Automatisk jakt på Norsk Tippings nye Lotto-endepunkt: last resultatsiden,
