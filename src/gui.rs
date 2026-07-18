@@ -8,7 +8,7 @@ use anyhow::Result;
 use eframe::egui::{self, Color32, RichText};
 use egui_plot::{
     BoxElem, BoxPlot, BoxSpread, GridInput, GridMark, HLine, Legend, Line, LineStyle, MarkerShape,
-    Plot, PlotPoints, Points,
+    Plot, PlotBounds, PlotPoints, Points,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -1751,6 +1751,8 @@ impl App {
             Plot::new("kursgraf")
                 .height(chart_h)
                 .legend(Legend::default())
+                // Hjulet skal zoome direkte (se under) — ikke rulle sidelengs.
+                .allow_scroll(false)
                 .x_grid_spacer(date_grid)
                 .x_axis_formatter(|mark, _range| {
                     chrono::DateTime::from_timestamp(mark.value as i64, 0)
@@ -1768,6 +1770,27 @@ impl App {
                     }
                 })
                 .show(ui, |plot_ui| {
+                    // Hjul = zoom rundt pekeren, uten Ctrl. Venstredra = flytt,
+                    // dobbeltklikk = nullstill visningen.
+                    let scroll_y = plot_ui.ctx().input(|i| i.raw_scroll_delta.y) as f64;
+                    if scroll_y != 0.0 && plot_ui.response().hovered() {
+                        let faktor = (-scroll_y * 0.0025).exp(); // opp = inn
+                        let bounds = plot_ui.plot_bounds();
+                        let (min_x, max_x) = (bounds.min()[0], bounds.max()[0]);
+                        let anker = plot_ui
+                            .pointer_coordinate()
+                            .map(|p| p.x)
+                            .unwrap_or((min_x + max_x) / 2.0);
+                        let ny_min = anker - (anker - min_x) * faktor;
+                        let ny_max = anker + (max_x - anker) * faktor;
+                        plot_ui.set_plot_bounds(PlotBounds::from_min_max(
+                            [ny_min, bounds.min()[1]],
+                            [ny_max, bounds.max()[1]],
+                        ));
+                        // La høydeaksen følge med automatisk videre.
+                        plot_ui.set_auto_bounds(egui::Vec2b::new(false, true));
+                    }
+
                     let line_style = if simple { ChartStyle::Line } else { self.style };
                     match line_style {
                         ChartStyle::Line => {
@@ -1895,7 +1918,7 @@ impl App {
                     ))
                     .on_hover_text("Med tidsramme aktiv har strategien sin egen kursserie (jevne lys). Grafens SMA-linjer bygger på en annen oppløsning og er kun veiledende.");
                 } else {
-                    ui.small("Strategien sma_cross kjøper når gul (rask) krysser over blå (treg), og selger ved kryss under. Zoom med musehjulet.")
+                    ui.small("Strategien sma_cross kjøper når gul (rask) krysser over blå (treg), og selger ved kryss under. Hjul = zoom · dra = flytt · dobbeltklikk = nullstill.")
                         .on_hover_text("SMA = gjennomsnittskursen siste N dager. Når det korte snittet krysser det lange, har retningen ofte snudd.");
                 }
             }
@@ -2654,8 +2677,9 @@ impl App {
                 let s = &mut self.settings;
                 section_heading(ui, "Generelt");
                 egui::Grid::new("innst_generelt").min_col_width(190.0).show(ui, |ui| {
-                    ui.label("Sekunder mellom kursoppdateringer");
-                    ui.add(egui::DragValue::new(&mut s.poll_secs).range(10..=300));
+                    ui.label("Sekunder mellom kursoppdateringer")
+                        .on_hover_text("15 er standard. For daytrading: 5 gir merkbart raskere puls (Kraken tåler det fint). Under 5 gir lite ekstra og mer nettstøy.");
+                    ui.add(egui::DragValue::new(&mut s.poll_secs).range(3..=300));
                     ui.end_row();
                     ui.label("Handle bare i børsens åpningstid");
                     ui.checkbox(&mut s.market_hours_only, "(krypto handles alltid)");
