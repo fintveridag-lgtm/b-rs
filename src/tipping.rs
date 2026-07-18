@@ -793,9 +793,45 @@ pub fn tolk_trekninger_liste(v: &Value, spill: Spill) -> Vec<Trekning> {
     }
 }
 
+/// Norsk Tippings resultatside-format: `winnerNumber` er en liste av
+/// objekter med `number`, `type` (1 = vinnertall, 2 = tilleggstall) og
+/// `name` («Vinnertall 3» / «Tilleggstall 1»). Returnerer (hoved, ekstra).
+fn tolk_vinnertall_objekter(v: &Value) -> Option<(Vec<u8>, Vec<u8>)> {
+    let Value::Array(liste) = finn_felt(v, &["winnerNumber", "winnerNumbers"])? else {
+        return None;
+    };
+    let mut hoved = Vec::new();
+    let mut ekstra = Vec::new();
+    for e in liste {
+        let Some(nr) = finn_tall_felt(e, &["number", "value", "tall"]) else { continue };
+        let type_ = finn_tall_felt(e, &["type"]).unwrap_or(1);
+        let navn = finn_felt(e, &["name"]).and_then(Value::as_str).unwrap_or("");
+        if type_ >= 2 || navn.to_lowercase().contains("tilleggstall") {
+            ekstra.push(nr as u8);
+        } else {
+            hoved.push(nr as u8);
+        }
+    }
+    if hoved.is_empty() {
+        None
+    } else {
+        Some((hoved, ekstra))
+    }
+}
+
 /// Tolk et API-svar til en trekning, tolerant for ulike feltnavn.
 pub fn tolk_trekning(v: &Value, spill: Spill) -> Option<Trekning> {
     let dato = finn_dato(v)?;
+    // Resultatsidens winnerNumber-objekter har både tall og type — bruk dem
+    // direkte når de finnes.
+    if let Some((mut hoved, ekstra)) = tolk_vinnertall_objekter(v) {
+        if hoved.len() < spill.hovedtall_antall() {
+            return None;
+        }
+        hoved.truncate(spill.hovedtall_antall());
+        hoved.sort_unstable();
+        return Some(Trekning { dato, hovedtall: hoved, ekstra });
+    }
     let hovedtall = finn_tall_serie(
         v,
         &[
@@ -1289,6 +1325,30 @@ mod tester {
             url,
             "https://www.veikkaus.fi/api/draw-results/v1/games/EJACKPOT/draws/by-week/2026-W01"
         );
+    }
+
+    #[test]
+    fn tolker_resultatsidens_winner_number_format() {
+        // Nøyaktig formen `jakt` viste fra norsk-tipping.no juli 2026.
+        let svar: Value = serde_json::from_str(
+            r#"{"drawDate":"2026-07-11T16:30:00.000Z","drawId":1575,
+                "drawName":"LOTTO-11.07.2026 18:30","isFinalized":true,
+                "prize":[{"id":1,"name":"7 rette","value":"2855715","winners":"5"}],
+                "winnerNumber":[
+                  {"drawOrder":1,"name":"Vinnertall 1","number":"30","type":1},
+                  {"drawOrder":2,"name":"Vinnertall 2","number":"11","type":1},
+                  {"drawOrder":3,"name":"Vinnertall 3","number":"3","type":1},
+                  {"drawOrder":4,"name":"Vinnertall 4","number":"24","type":1},
+                  {"drawOrder":5,"name":"Vinnertall 5","number":"18","type":1},
+                  {"drawOrder":6,"name":"Vinnertall 6","number":"16","type":1},
+                  {"drawOrder":7,"name":"Vinnertall 7","number":"7","type":1},
+                  {"drawOrder":11,"name":"Tilleggstall 1","number":"28","type":2}]}"#,
+        )
+        .unwrap();
+        let t = tolk_trekning(&svar, Spill::Lotto).unwrap();
+        assert_eq!(t.dato, NaiveDate::from_ymd_opt(2026, 7, 11).unwrap());
+        assert_eq!(t.hovedtall, vec![3, 7, 11, 16, 18, 24, 30]);
+        assert_eq!(t.ekstra, vec![28]);
     }
 
     #[test]
