@@ -16,6 +16,7 @@ fn main() {
         Some("hent") => hent(&args[1..]),
         Some("analyse") => analyse(&args[1..]),
         Some("sonde") => sonde(),
+        Some("jakt") => jakt(),
         _ => {
             hjelp();
             Ok(())
@@ -45,6 +46,9 @@ Bruk:
             med lav forventet premiedeling. --fro gir reproduserbare rekker.
   sonde     Test alle kjente endepunkt-kandidater og vis hva de svarer —
             kjør denne hvis `hent` feiler, og del utskriften ved feilsøking.
+  jakt      Let automatisk etter Norsk Tippings nye Lotto-endepunkt: leser
+            resultatsiden og skanner JavaScript-bundlene etter API-stier.
+            Del utskriften ved feilsøking.
 
 CSV-format (kan også lages for hånd fra andre kilder):
   dato;hovedtall;ekstra          f.eks.  2026-01-03;2,9,17,22,28,31,34;5
@@ -146,6 +150,25 @@ fn sonde() -> anyhow::Result<()> {
             println!("{url}\n  → {utfall}\n");
         }
         println!("Del denne utskriften ved feilsøking, så kan riktig kilde velges.");
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+fn jakt() -> anyhow::Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        // Nettleser-aktig UA: NT har vist seg å tvangslukke ukjente klienter.
+        let klient = reqwest::Client::builder()
+            .user_agent(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+            )
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+        for linje in tipping::lotto_jakt(&klient).await {
+            println!("{linje}");
+        }
+        println!("\nDel denne utskriften ved feilsøking, så kan Lotto-kilden bygges rundt riktig sti.");
         Ok::<(), anyhow::Error>(())
     })
 }

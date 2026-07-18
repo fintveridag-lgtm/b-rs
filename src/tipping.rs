@@ -221,10 +221,12 @@ pub const NT_MALER: [&str; 2] = [
 
 impl Spill {
     /// Spillnavn-kandidater i Veikkaus-API-et (tom = ikke fellestrekning).
+    /// Bekreftet mot API-et juli 2026: `VIKING` og `EJACKPOT` gir 200 OK;
+    /// `VIKINGLOTTO` avvises med INVALID_VALUE.
     pub fn veikkaus_navn(self) -> &'static [&'static str] {
         match self {
             Spill::Lotto => &[],
-            Spill::Vikinglotto => &["VIKINGLOTTO", "VIKING"],
+            Spill::Vikinglotto => &["VIKING"],
             Spill::Eurojackpot => &["EJACKPOT"],
         }
     }
@@ -440,6 +442,156 @@ pub async fn sonde(klient: &reqwest::Client) -> Vec<(String, String)> {
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     }
     rapport
+}
+
+/// Automatisk jakt på Norsk Tippings nye Lotto-endepunkt: last resultatsiden,
+/// let etter innbakt JSON med vinnertall, og skann sidens JavaScript-bundler
+/// etter API-stier. Returnerer en tekstrapport til å dele ved feilsøking.
+pub async fn lotto_jakt(klient: &reqwest::Client) -> Vec<String> {
+    let mut rapport = Vec::new();
+    let side_url = "https://www.norsk-tipping.no/lotteri/lotto/resultater";
+    rapport.push(format!("Henter {side_url} …"));
+    let html = match klient
+        .get(side_url)
+        .header("Accept", "text/html")
+        .send()
+        .await
+    {
+        Ok(svar) => {
+            rapport.push(format!("  status {}", svar.status()));
+            svar.text().await.unwrap_or_default()
+        }
+        Err(e) => {
+            rapport.push(format!("  FEIL: {e}"));
+            return rapport;
+        }
+    };
+
+    // 1) Innbakt JSON i selve siden? (SSR-data inneholder ofte siste trekning.)
+    for marker in [
+        "__NEXT_DATA__", "winningNumbers", "mainNumbers", "vinnertall",
+        "drawDate", "drawId", "prizeLevel",
+    ] {
+        for (funn, utdrag) in finn_utdrag(&html, marker, 220).into_iter().take(2) {
+            rapport.push(format!("  fant «{funn}» i HTML: …{utdrag}…"));
+        }
+    }
+
+    // 2) Skann JavaScript-bundlene etter API-stier med result/draw/lotto.
+    let bundler = finn_js_urler(&html, side_url);
+    rapport.push(format!("Fant {} JavaScript-filer, skanner inntil 8 …", bundler.len()));
+    let mut kandidater: Vec<String> = Vec::new();
+    for url in bundler.into_iter().take(8) {
+        let Ok(svar) = klient.get(&url).send().await else { continue };
+        let Ok(js) = svar.text().await else { continue };
+        for token in finn_api_tokener(&js) {
+            if !kandidater.contains(&token) {
+                kandidater.push(token);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    }
+    kandidater.truncate(60);
+    if kandidater.is_empty() {
+        rapport.push("Ingen API-stier funnet i bundlene.".into());
+    } else {
+        rapport.push(format!("Mulige API-stier ({}):", kandidater.len()));
+        for k in kandidater {
+            rapport.push(format!("  {k}"));
+        }
+    }
+    rapport
+}
+
+/// Finn korte utdrag rundt et søkeord (uten regex-avhengighet).
+fn finn_utdrag(tekst: &str, marker: &str, lengde: usize) -> Vec<(String, String)> {
+    let mut ut = Vec::new();
+    let mut fra = 0usize;
+    while let Some(pos) = tekst[fra..].find(marker) {
+        let start = fra + pos;
+        let slutt = (start + lengde).min(tekst.len());
+        // Klipp på tegn-grenser så vi ikke deler en UTF-8-sekvens.
+        let mut s = start;
+        while !tekst.is_char_boundary(s) {
+            s -= 1;
+        }
+        let mut e = slutt;
+        while !tekst.is_char_boundary(e) {
+            e -= 1;
+        }
+        ut.push((
+            marker.to_string(),
+            tekst[s..e].replace(['\n', '\r'], " "),
+        ));
+        fra = slutt;
+        if ut.len() >= 4 {
+            break;
+        }
+    }
+    ut
+}
+
+/// Plukk `<script src="…js">`-URL-er (og preload-lenker) ut av HTML.
+fn finn_js_urler(html: &str, side_url: &str) -> Vec<String> {
+    let mut urler = Vec::new();
+    let mut fra = 0usize;
+    while let Some(pos) = html[fra..].find(".js") {
+        let slutt = fra + pos + 3;
+        // Gå bakover til nærmeste fnutt for å få hele URL-en.
+        let start = html[..slutt]
+            .rfind(['"', '\''])
+            .map(|i| i + 1)
+            .unwrap_or(slutt);
+        let kandidat = &html[start..slutt];
+        if !kandidat.contains(' ') && kandidat.len() > 4 {
+            let full = if kandidat.starts_with("http") {
+                kandidat.to_string()
+            } else if kandidat.starts_with("//") {
+                format!("https:{kandidat}")
+            } else if kandidat.starts_with('/') {
+                format!("https://www.norsk-tipping.no{kandidat}")
+            } else {
+                format!("{}/{}", side_url.trim_end_matches('/'), kandidat)
+            };
+            if !urler.contains(&full) {
+                urler.push(full);
+            }
+        }
+        fra = slutt;
+    }
+    urler
+}
+
+/// Finn strenger i JavaScript som ligner API-stier for resultater.
+fn finn_api_tokener(js: &str) -> Vec<String> {
+    let mut ut = Vec::new();
+    let js_lav = js.to_lowercase();
+    let mut fra = 0usize;
+    while let Some(pos) = js_lav[fra..].find("api") {
+        let midt = fra + pos;
+        // Utvid til hele tokenet, avgrenset av fnutter/mellomrom.
+        let grense = |c: char| c == '"' || c == '\'' || c == '`' || c.is_whitespace();
+        let start = js[..midt].rfind(grense).map(|i| i + 1).unwrap_or(0);
+        let slutt = js[midt..].find(grense).map(|i| midt + i).unwrap_or(js.len());
+        fra = slutt.max(midt + 3);
+        if slutt <= start || slutt - start > 160 {
+            continue;
+        }
+        let token = &js[start..slutt];
+        let lav = token.to_lowercase();
+        if (lav.contains("result") || lav.contains("draw") || lav.contains("lotto"))
+            && (token.starts_with('/') || token.starts_with("http"))
+        {
+            let t = token.to_string();
+            if !ut.contains(&t) {
+                ut.push(t);
+            }
+        }
+        if ut.len() >= 80 {
+            break;
+        }
+    }
+    ut
 }
 
 async fn hent_json(klient: &reqwest::Client, url: &str) -> Result<Value> {
@@ -980,6 +1132,26 @@ mod tester {
             url,
             "https://www.veikkaus.fi/api/draw-results/v1/games/EJACKPOT/draws/by-week/2026-W01"
         );
+    }
+
+    #[test]
+    fn jakten_finner_js_urler_og_api_stier() {
+        let html = r#"<html><script src="/static/main.abc123.js"></script>
+            <link href="https://cdn.norsk-tipping.no/chunk.def.js"><body>
+            {"winningNumbers":[1,2,3]}</body></html>"#;
+        let urler = finn_js_urler(html, "https://www.norsk-tipping.no/lotteri/lotto/resultater");
+        assert!(urler.contains(&"https://www.norsk-tipping.no/static/main.abc123.js".to_string()));
+        assert!(urler.contains(&"https://cdn.norsk-tipping.no/chunk.def.js".to_string()));
+
+        let js = r#"fetch("/api/lottery/v2/results/lotto/latest");const x="https://api.norsk-tipping.no/gameresult/draws";const uinteressant="/api/banner/v1";"#;
+        let tokener = finn_api_tokener(js);
+        assert!(tokener.contains(&"/api/lottery/v2/results/lotto/latest".to_string()));
+        assert!(tokener.contains(&"https://api.norsk-tipping.no/gameresult/draws".to_string()));
+        assert!(!tokener.iter().any(|t| t.contains("banner")));
+
+        let utdrag = finn_utdrag(html, "winningNumbers", 40);
+        assert_eq!(utdrag.len(), 1);
+        assert!(utdrag[0].1.starts_with("winningNumbers"));
     }
 
     #[test]
