@@ -125,12 +125,12 @@ fn hent(args: &[String]) -> anyhow::Result<()> {
             )
             .await?;
             let sti = tipping::csv_sti(&valg.mappe, *spill);
-            tipping::skriv_csv(&sti, &trekninger)?;
+            let (forste, siste) =
+                (trekninger.first().unwrap().dato, trekninger.last().unwrap().dato);
+            let hentet = trekninger.len();
+            let totalt = tipping::oppdater_csv(&sti, trekninger)?;
             println!(
-                "  {} trekninger ({} – {}) lagret i {}",
-                trekninger.len(),
-                trekninger.first().unwrap().dato,
-                trekninger.last().unwrap().dato,
+                "  {hentet} trekninger hentet ({forste} – {siste}); {totalt} totalt i {}",
                 sti.display()
             );
         }

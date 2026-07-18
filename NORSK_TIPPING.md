@@ -39,16 +39,21 @@ Det analysen gir deg:
 
 Datahentingen prøver kilder i rekkefølge til én svarer:
 
-1. **Veikkaus** (Finlands spillselskap) sitt åpne resultat-API — Vikinglotto
-   og Eurojackpot er fellestrekninger på tvers av landene, så vinnertallene
-   er identiske med Norsk Tippings. Gjelder ikke norsk Lotto.
-2. **Norsk Tippings uoffisielle** endepunkt
-   (`/api-{spill}/getResultInfo.json?drawID=`) — lagt ned per 2026, men
-   beholdt som reserve; `--endepunkt` kan overstyre URL-malen.
+1. **Veikkaus** (Finlands spillselskap) sitt åpne resultat-API
+   (`draw-results/v1`, spillnavn `VIKING` og `EJACKPOT`) — Vikinglotto og
+   Eurojackpot er fellestrekninger på tvers av landene, så vinnertallene er
+   identiske med Norsk Tippings. Gjelder ikke norsk Lotto.
+2. **Norsk Tippings resultatside** — trekningene ligger innbakt som JSON i
+   HTML-en og skrapes derfra. Siden viser bare ~15 uker, men `hent` slår
+   sammen med eksisterende CSV, så Lotto-historikken **bygges opp over tid**
+   for hver gang du henter.
+3. **Norsk Tippings gamle** drawID-endepunkt — lagt ned per 2026, beholdt
+   som reserve; `--endepunkt` kan overstyre URL-malen.
 
-Feiler alt: kjør `b-tipping sonde` (tester alle kandidatene og viser hva de
-svarer), eller legg inn CSV manuelt (`dato;hovedtall;ekstra`, tall
-kommaseparert) i `data/tipping/`.
+Feiler noe: kjør `b-tipping sonde` (tester API-kandidatene) og
+`b-tipping jakt` (skanner resultatsiden og JS-bundlene etter nye stier),
+eller legg inn CSV manuelt (`dato;hovedtall;ekstra`, tall kommaseparert)
+i `data/tipping/`.
 
 > Merk regelendringer i historikken: Vikinglottos vikingtall var 1 av 8 før
 > 2017 (nå 1 av 5), og Eurojackpots stjernetall 2 av 10 før mars 2022 (nå

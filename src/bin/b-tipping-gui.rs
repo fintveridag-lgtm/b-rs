@@ -144,7 +144,7 @@ impl TippingApp {
                 match resultat {
                     Ok(trekninger) => {
                         let sti = tipping::csv_sti(&mappe, spill);
-                        if let Err(e) = tipping::skriv_csv(&sti, &trekninger) {
+                        if let Err(e) = tipping::oppdater_csv(&sti, trekninger) {
                             feil.push(format!("{}: {e:#}", spill.navn()));
                         }
                     }

@@ -162,6 +162,18 @@ pub fn skriv_csv(sti: &Path, trekninger: &[Trekning]) -> Result<()> {
     std::fs::write(sti, ut).with_context(|| format!("kunne ikke skrive {}", sti.display()))
 }
 
+/// Slå nye trekninger sammen med det som alt står i CSV-en og skriv tilbake.
+/// Slik bygger kilder med kort vindu (Lotto-siden viser ~15 uker) seg opp
+/// til full historikk over tid. Returnerer totalt antall etter sammenslåing.
+pub fn oppdater_csv(sti: &Path, nye: Vec<Trekning>) -> Result<usize> {
+    let mut alle = les_csv(sti).unwrap_or_default();
+    alle.extend(nye);
+    alle.sort_by_key(|t| t.dato);
+    alle.dedup_by_key(|t| t.dato);
+    skriv_csv(sti, &alle)?;
+    Ok(alle.len())
+}
+
 /// Les historikk fra CSV; ukjente/ødelagte linjer hoppes over med telling.
 pub fn les_csv(sti: &Path) -> Result<Vec<Trekning>> {
     let innhold = std::fs::read_to_string(sti)
@@ -281,6 +293,12 @@ pub async fn hent_historikk(
                 Err(e) => feil.push(format!("Veikkaus {navn} ({base}): {e:#}")),
             }
         }
+    }
+    // Resultatsiden med innbakt JSON — eneste kjente kilde for norsk Lotto.
+    match hent_nt_side(klient, spill, fra_dato, &fremdrift).await {
+        Ok(t) if !t.is_empty() => return Ok(t),
+        Ok(_) => feil.push("Norsk Tippings resultatside: fant ingen trekninger i HTML-en".into()),
+        Err(e) => feil.push(format!("Norsk Tippings resultatside: {e:#}")),
     }
     for mal in NT_MALER {
         match hent_nt_drawid(klient, spill, fra_dato, mal, &fremdrift).await {
@@ -444,6 +462,115 @@ pub async fn sonde(klient: &reqwest::Client) -> Vec<(String, String)> {
     rapport
 }
 
+/// Norsk Tippings resultatside per spill. Serverrendret HTML med trekningene
+/// innbakt som escaped JSON — vår Lotto-kilde etter at API-et forsvant.
+/// Siden viser bare ~15 uker historikk, så CSV-en bygges opp over tid.
+pub fn nt_side_url(spill: Spill) -> String {
+    format!("https://www.norsk-tipping.no/lotteri/{}/resultater", spill.api_navn())
+}
+
+/// Trekk trekninger ut av resultatsidens HTML: finn `"drawDate"`-objektene i
+/// den innbakte (escaped) JSON-en og tolk hvert objekt tolerant.
+pub fn trekk_ut_innbakte_trekninger(html: &str, spill: Spill) -> Vec<Trekning> {
+    let renset = html.replace("\\\"", "\"");
+    let mut ut: Vec<Trekning> = Vec::new();
+    let mut fra = 0usize;
+    while let Some(pos) = renset[fra..].find("\"drawDate\"") {
+        let midt = fra + pos;
+        if let Some(obj) = objekt_rundt(&renset, midt) {
+            if let Ok(v) = serde_json::from_str::<Value>(obj) {
+                if let Some(t) = tolk_trekning(&v, spill) {
+                    ut.push(t);
+                }
+            }
+        }
+        fra = midt + "\"drawDate\"".len();
+    }
+    ut.sort_by_key(|t| t.dato);
+    ut.dedup_by_key(|t| t.dato);
+    ut
+}
+
+/// Finn JSON-objektet `{ … }` som omslutter posisjonen `midt`.
+fn objekt_rundt(tekst: &str, midt: usize) -> Option<&str> {
+    // Bakover til objektets '{' (teller '}' vi passerer på veien).
+    let mut dybde = 0i32;
+    let mut start = None;
+    for (i, b) in tekst[..midt].bytes().enumerate().rev() {
+        match b {
+            b'}' => dybde += 1,
+            b'{' => {
+                if dybde == 0 {
+                    start = Some(i);
+                    break;
+                }
+                dybde -= 1;
+            }
+            _ => {}
+        }
+    }
+    let start = start?;
+    // Fremover til matchende '}', med respekt for strenger og escapes.
+    let bytes = tekst.as_bytes();
+    let mut dybde = 0i32;
+    let mut i_streng = false;
+    let mut forrige_escape = false;
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if i_streng {
+            if forrige_escape {
+                forrige_escape = false;
+            } else if b == b'\\' {
+                forrige_escape = true;
+            } else if b == b'"' {
+                i_streng = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => i_streng = true,
+            b'{' => dybde += 1,
+            b'}' => {
+                dybde -= 1;
+                if dybde == 0 {
+                    return Some(&tekst[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Hent trekninger fra Norsk Tippings resultatside (SSR-skraping).
+async fn hent_nt_side(
+    klient: &reqwest::Client,
+    spill: Spill,
+    fra_dato: NaiveDate,
+    fremdrift: &impl Fn(usize, NaiveDate),
+) -> Result<Vec<Trekning>> {
+    let url = nt_side_url(spill);
+    let html = klient
+        .get(&url)
+        .header("Accept", "text/html")
+        // Siden tvangslukker ukjente klienter; oppfør oss som en nettleser.
+        .header(
+            reqwest::header::USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+        )
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    let mut trekninger = trekk_ut_innbakte_trekninger(&html, spill);
+    rydd(&mut trekninger, fra_dato);
+    for t in &trekninger {
+        fremdrift(trekninger.len(), t.dato);
+    }
+    Ok(trekninger)
+}
+
 /// Automatisk jakt på Norsk Tippings nye Lotto-endepunkt: last resultatsiden,
 /// let etter innbakt JSON med vinnertall, og skann sidens JavaScript-bundler
 /// etter API-stier. Returnerer en tekstrapport til å dele ved feilsøking.
@@ -472,16 +599,16 @@ pub async fn lotto_jakt(klient: &reqwest::Client) -> Vec<String> {
         "__NEXT_DATA__", "winningNumbers", "mainNumbers", "vinnertall",
         "drawDate", "drawId", "prizeLevel",
     ] {
-        for (funn, utdrag) in finn_utdrag(&html, marker, 220).into_iter().take(2) {
+        for (funn, utdrag) in finn_utdrag(&html, marker, 600).into_iter().take(2) {
             rapport.push(format!("  fant «{funn}» i HTML: …{utdrag}…"));
         }
     }
 
     // 2) Skann JavaScript-bundlene etter API-stier med result/draw/lotto.
     let bundler = finn_js_urler(&html, side_url);
-    rapport.push(format!("Fant {} JavaScript-filer, skanner inntil 8 …", bundler.len()));
+    rapport.push(format!("Fant {} JavaScript-filer, skanner alle …", bundler.len()));
     let mut kandidater: Vec<String> = Vec::new();
-    for url in bundler.into_iter().take(8) {
+    for url in bundler.into_iter().take(40) {
         let Ok(svar) = klient.get(&url).send().await else { continue };
         let Ok(js) = svar.text().await else { continue };
         for token in finn_api_tokener(&js) {
@@ -579,9 +706,15 @@ fn finn_api_tokener(js: &str) -> Vec<String> {
         }
         let token = &js[start..slutt];
         let lav = token.to_lowercase();
-        if (lav.contains("result") || lav.contains("draw") || lav.contains("lotto"))
-            && (token.starts_with('/') || token.starts_with("http"))
-        {
+        // Sti-aktige tokener med result/draw/lotto, ELLER tjenestenavn som
+        // åpenbart handler om resultater (uansett prefiks).
+        let sti_aktig = (lav.contains("result") || lav.contains("draw") || lav.contains("lotto"))
+            && (token.starts_with('/') || token.starts_with("http"));
+        let tjeneste = lav.contains("gameresult")
+            || lav.contains("getresult")
+            || lav.contains("drawgame")
+            || lav.contains("lotteryresult");
+        if sti_aktig || tjeneste {
             let t = token.to_string();
             if !ut.contains(&t) {
                 ut.push(t);
@@ -644,7 +777,10 @@ pub fn tolk_trekning(v: &Value, spill: Spill) -> Option<Trekning> {
     let dato = finn_dato(v)?;
     let hovedtall = finn_tall_serie(
         v,
-        &["winningNumbers", "mainNumbers", "vinnertall", "hovedtall", "primary", "numbers"],
+        &[
+            "winningNumbers", "mainNumbers", "vinnertall", "hovedtall", "primary",
+            "drawNumbers", "winningNumberList", "lottoNumbers", "numbers",
+        ],
     )?;
     if hovedtall.len() < spill.hovedtall_antall() {
         return None;
@@ -1132,6 +1268,39 @@ mod tester {
             url,
             "https://www.veikkaus.fi/api/draw-results/v1/games/EJACKPOT/draws/by-week/2026-W01"
         );
+    }
+
+    #[test]
+    fn skraper_innbakt_json_fra_resultatsiden() {
+        // Escaped SSR-JSON slik `jakt`-utskriften viste den (forkortet),
+        // med et vinnertall-felt slik tolk_trekning forstår det.
+        let html = r#"<script>window.__STATE__={"data":"{\"draws\":[{\"drawDate\":\"2026-07-11T16:30:00.000Z\",\"drawId\":1575,\"drawState\":12,\"isFinalized\":true,\"mainNumbers\":[2,9,17,22,28,31,34],\"additionalNumbers\":[5],\"prize\":[{\"name\":\"7 rette\"}]},{\"drawDate\":\"2026-07-04T16:30:00.000Z\",\"drawId\":1574,\"mainNumbers\":[1,4,12,19,25,30,33],\"additionalNumbers\":[7]}]}"}</script>"#;
+        let trekninger = trekk_ut_innbakte_trekninger(html, Spill::Lotto);
+        assert_eq!(trekninger.len(), 2);
+        assert_eq!(trekninger[0].dato, NaiveDate::from_ymd_opt(2026, 7, 4).unwrap());
+        assert_eq!(trekninger[1].hovedtall, vec![2, 9, 17, 22, 28, 31, 34]);
+        assert_eq!(trekninger[1].ekstra, vec![5]);
+    }
+
+    #[test]
+    fn oppdater_csv_slaar_sammen_uten_duplikater() {
+        let mappe = std::env::temp_dir().join("b-tipping-test-oppdater");
+        let sti = mappe.join("lotto.csv");
+        let _ = std::fs::remove_file(&sti);
+        let a = Trekning {
+            dato: NaiveDate::from_ymd_opt(2026, 7, 4).unwrap(),
+            hovedtall: vec![1, 4, 12, 19, 25, 30, 33],
+            ekstra: vec![7],
+        };
+        let b = Trekning {
+            dato: NaiveDate::from_ymd_opt(2026, 7, 11).unwrap(),
+            hovedtall: vec![2, 9, 17, 22, 28, 31, 34],
+            ekstra: vec![5],
+        };
+        assert_eq!(oppdater_csv(&sti, vec![a.clone()]).unwrap(), 1);
+        // Overlappende ny henting: a igjen + b → totalt 2, ikke 3.
+        assert_eq!(oppdater_csv(&sti, vec![a, b]).unwrap(), 2);
+        let _ = std::fs::remove_dir_all(&mappe);
     }
 
     #[test]
