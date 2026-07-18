@@ -103,6 +103,7 @@ fn tolk_valg(args: &[String]) -> anyhow::Result<Valg> {
 
 fn hent(args: &[String]) -> anyhow::Result<()> {
     let valg = tolk_valg(args)?;
+    println!("({})", tipping::KILDE_VERSJON);
     let fra_dato = NaiveDate::from_ymd_opt(valg.fra_aar, 1, 1).unwrap();
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {

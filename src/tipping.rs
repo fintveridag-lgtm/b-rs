@@ -13,6 +13,10 @@
 //! endepunktmalen overstyres, og alt lagres lokalt som CSV så analysen
 //! fungerer uten nett.
 
+/// Versjonsmerke for kildeoppsettet — vises i GUI og CLI, så det er lett å
+/// se om en kjørende binær faktisk har de nyeste hente-kildene.
+pub const KILDE_VERSJON: &str = "kildeoppsett v4 · Veikkaus draw-results + NT-side";
+
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{Datelike, NaiveDate};
 use serde_json::Value;

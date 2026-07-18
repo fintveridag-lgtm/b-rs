@@ -261,6 +261,9 @@ impl TippingApp {
                         .color(GRAY)
                         .size(12.0),
                     );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(tipping::KILDE_VERSJON).color(BORDER).size(11.0));
+                    });
                 });
             });
     }
