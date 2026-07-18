@@ -103,9 +103,26 @@ impl Yahoo {
     /// (symbol, beskrivelse, kategori) der kategorien er norsk og klar for
     /// filtrering: "Aksje", "Fond/ETF", "Krypto" eller "Indeks".
     pub async fn search(&self, query: &str) -> Result<Vec<(String, String, String)>> {
+        let mut out = self.search_once(query).await?;
+        // Yahoo er kresen: «dnb teknologi a fond» matcher ofte ikke, mens
+        // «dnb teknologi» gjør det. Prøv igjen uten fyllord ved null treff.
+        if out.is_empty() {
+            let renset: String = query
+                .split_whitespace()
+                .filter(|w| !matches!(w.to_lowercase().as_str(), "fond" | "fund" | "aksje" | "aksjer" | "etf"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !renset.is_empty() && renset != query {
+                out = self.search_once(&renset).await?;
+            }
+        }
+        Ok(out)
+    }
+
+    async fn search_once(&self, query: &str) -> Result<Vec<(String, String, String)>> {
         let url = reqwest::Url::parse_with_params(
             "https://query1.finance.yahoo.com/v1/finance/search",
-            &[("q", query), ("quotesCount", "12"), ("newsCount", "0")],
+            &[("q", query), ("quotesCount", "15"), ("newsCount", "0")],
         )?;
         let v = self.get_json(url.as_str()).await?;
         let mut out = Vec::new();

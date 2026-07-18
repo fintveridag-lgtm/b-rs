@@ -3102,6 +3102,32 @@ impl App {
                         ui.small("Ingen treff i denne kategorien — prøv «Alle».");
                     }
                 }
+                // Fluktluke: norske fond ligger på Yahoo under Morningstar-koder
+                // (0P0000XXXX.OL) som navnesøket ofte bommer på. La brukeren
+                // lime inn symbolet direkte.
+                if !st.search_pending && !self.search_query.trim().is_empty() {
+                    let direkte = self.search_query.trim().to_uppercase();
+                    if direkte.len() >= 3 && !st.watchlist.iter().any(|s| s == &direkte) {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(RichText::new(format!("➕ Følg «{direkte}» som Yahoo-symbol direkte")).small())
+                                .on_hover_text(
+                                    "Fant ikke søket det du lette etter? Finn symbolet på finance.yahoo.com \
+                                     (norske fond heter f.eks. 0P0000XXXX.OL) og lim det inn i søkefeltet — \
+                                     denne knappen legger det rett i watchlisten.",
+                                )
+                                .clicked()
+                            {
+                                to_follow.push(direkte.clone());
+                            }
+                            ui.label(
+                                RichText::new("(for symboler navnesøket ikke finner — f.eks. norske fond: 0P…-koder fra finance.yahoo.com)")
+                                    .small()
+                                    .color(GRAY),
+                            );
+                        });
+                    }
+                }
                 ui.add_space(14.0);
 
                 market_table(
