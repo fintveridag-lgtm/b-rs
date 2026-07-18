@@ -245,6 +245,35 @@ fn analyse(args: &[String]) -> anyhow::Result<()> {
                         "større avvik enn ventet — sjekk datakvaliteten før du tolker noe"
                     }
                 );
+
+                let hot = tipping::gjenganger_rekke(&a);
+                let tall: Vec<String> = hot.hovedtall.iter().map(u8::to_string).collect();
+                let e = if hot.ekstra.is_empty() {
+                    String::new()
+                } else {
+                    let e: Vec<String> = hot.ekstra.iter().map(u8::to_string).collect();
+                    format!(" + [{}]", e.join(","))
+                };
+                println!(
+                    "Gjenganger-rekka (mest trukne tall): {}{}\n  (samme vinnersjanse som alle andre rekker — og mest delt om den vinner)",
+                    tall.join(" "),
+                    e
+                );
+                let gjentak = tipping::gjentatte_rekker(&trekninger);
+                let forventet = tipping::forventet_gjentak(a.antall_trekninger, *spill);
+                if gjentak.is_empty() {
+                    println!(
+                        "Gjentatte vinnerrekker: ingen i {} trekninger (ren tilfeldighet forventer {:.2})",
+                        a.antall_trekninger, forventet
+                    );
+                } else {
+                    for (rekke, datoer) in gjentak.iter().take(5) {
+                        let tall: Vec<String> = rekke.iter().map(u8::to_string).collect();
+                        let d: Vec<String> = datoer.iter().map(|d| d.to_string()).collect();
+                        println!("Gjentatt vinnerrekke: {} — trukket {}", tall.join(" "), d.join(" og "));
+                    }
+                    println!("  (forventet ved ren tilfeldighet: {forventet:.2} — sier ingenting om fremtiden)");
+                }
             }
             _ => {
                 println!(

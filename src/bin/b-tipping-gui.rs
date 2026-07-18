@@ -7,7 +7,7 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use b_rs::tipping::{self, Analyse, Rekke, Spill};
+use b_rs::tipping::{self, Analyse, Rekke, Spill, Trekning};
 use chrono::Datelike;
 use eframe::egui::{self, Color32, RichText};
 use egui_plot::{Bar, BarChart, HLine, Plot};
@@ -57,10 +57,12 @@ struct TippingApp {
     mappe: PathBuf,
     valgt: Spill,
     analyser: HashMap<&'static str, Analyse>,
+    historikk: HashMap<&'static str, Vec<Trekning>>,
     rekker: HashMap<&'static str, Vec<Rekke>>,
     fro: u64,
     status: Arc<Mutex<Option<HentStatus>>>,
     melding: Option<(String, Color32)>,
+    vis_gjengangere: bool,
 }
 
 impl TippingApp {
@@ -71,10 +73,12 @@ impl TippingApp {
             mappe: PathBuf::from("data/tipping"),
             valgt: Spill::Lotto,
             analyser: HashMap::new(),
+            historikk: HashMap::new(),
             rekker: HashMap::new(),
             fro,
             status: Arc::new(Mutex::new(None)),
             melding: None,
+            vis_gjengangere: false,
         };
         app.les_historikk();
         app.lag_rekker();
@@ -84,6 +88,7 @@ impl TippingApp {
     /// Les CSV-ene fra disk og analyser det som finnes.
     fn les_historikk(&mut self) {
         self.analyser.clear();
+        self.historikk.clear();
         for spill in Spill::ALLE {
             let sti = tipping::csv_sti(&self.mappe, spill);
             if let Ok(trekninger) = tipping::les_csv(&sti) {
@@ -91,6 +96,7 @@ impl TippingApp {
                     if let Ok(a) = tipping::analyser(spill, &trekninger) {
                         self.analyser.insert(spill.api_navn(), a);
                     }
+                    self.historikk.insert(spill.api_navn(), trekninger);
                 }
             }
         }
@@ -297,7 +303,9 @@ impl TippingApp {
             });
     }
 
-    fn statistikk_kort(&self, ui: &mut egui::Ui, spill: Spill) {
+    fn statistikk_kort(&mut self, ui: &mut egui::Ui, spill: Spill) {
+        let mut veksle_gjengangere = false;
+        let vis_gjengangere = self.vis_gjengangere;
         kort(ui, |ui| {
             ui.label(RichText::new("Trekningshistorikk").strong().size(16.0));
             let Some(a) = self.analyser.get(spill.api_navn()) else {
@@ -396,7 +404,108 @@ impl TippingApp {
                 ))
                 .color(farge),
             );
+
+            ui.add_space(8.0);
+            let knapp = if vis_gjengangere {
+                "🔁 Skjul gjenganger-analysen"
+            } else {
+                "🔁 Gjenganger-analyse"
+            };
+            if ui
+                .button(knapp)
+                .on_hover_text(
+                    "Setter de mest trukne tallene sammen til én rekke, og sjekker om \
+                     noen vinnerrekke faktisk har gjentatt seg i historikken.",
+                )
+                .clicked()
+            {
+                veksle_gjengangere = true;
+            }
+            if vis_gjengangere {
+                let hot = tipping::gjenganger_rekke(a);
+                ui.add_space(4.0);
+                ui.label(RichText::new("Gjenganger-rekka (mest trukne tall):").strong());
+                ui.horizontal(|ui| {
+                    let tall: Vec<String> =
+                        hot.hovedtall.iter().map(|t| format!("{t:>2}")).collect();
+                    ui.label(
+                        RichText::new(tall.join("  "))
+                            .monospace()
+                            .size(16.0)
+                            .color(TEXT_LIGHT),
+                    );
+                    if !hot.ekstra.is_empty() {
+                        let e: Vec<String> = hot.ekstra.iter().map(u8::to_string).collect();
+                        ui.label(
+                            RichText::new(format!("+ {}", e.join(" ")))
+                                .monospace()
+                                .size(16.0)
+                                .color(GREEN),
+                        );
+                    }
+                });
+                ui.label(
+                    RichText::new(format!(
+                        "Ærlig talt: denne rekka har nøyaktig samme vinnersjanse \
+                         (1 : {}) som alle andre — chi-kvadraten over viser at \
+                         frekvensforskjellene er støy. Og «varme» tall spilles av \
+                         mange, så vinner den, deler du trolig potten med flere. \
+                         Rekkene til høyre er derfor det smartere valget.",
+                        med_skilletegn(spill.kombinasjoner())
+                    ))
+                    .color(YELLOW)
+                    .size(12.0),
+                );
+
+                ui.add_space(6.0);
+                ui.label(RichText::new("Har en vinnerrekke gjentatt seg?").strong());
+                if let Some(trekninger) = self.historikk.get(spill.api_navn()) {
+                    let gjentak = tipping::gjentatte_rekker(trekninger);
+                    let forventet = tipping::forventet_gjentak(a.antall_trekninger, spill);
+                    if gjentak.is_empty() {
+                        ui.label(
+                            RichText::new(format!(
+                                "Nei — aldri i de {} trekningene som er lastet. Ren \
+                                 tilfeldighet forventer {:.2} gjentak i et så lite utvalg \
+                                 av {} mulige rekker, så dette er akkurat som ventet.",
+                                a.antall_trekninger,
+                                forventet,
+                                med_skilletegn(spill.kombinasjoner())
+                            ))
+                            .color(GRAY)
+                            .size(12.0),
+                        );
+                    } else {
+                        for (rekke, datoer) in gjentak.iter().take(5) {
+                            let tall: Vec<String> = rekke.iter().map(u8::to_string).collect();
+                            let d: Vec<String> =
+                                datoer.iter().map(|d| d.to_string()).collect();
+                            ui.label(
+                                RichText::new(format!(
+                                    "Ja! {} — trukket {}",
+                                    tall.join(" "),
+                                    d.join(" og ")
+                                ))
+                                .color(GREEN)
+                                .size(12.0),
+                            );
+                        }
+                        ui.label(
+                            RichText::new(format!(
+                                "(Forventet ved ren tilfeldighet: {:.2} — et gjentak gjør \
+                                 uansett ikke rekka mer eller mindre sannsynlig fremover.)",
+                                tipping::forventet_gjentak(a.antall_trekninger, spill)
+                            ))
+                            .color(GRAY)
+                            .size(12.0),
+                        );
+                    }
+                }
+            }
         });
+        if veksle_gjengangere {
+            self.vis_gjengangere = !self.vis_gjengangere;
+        }
     }
 
     fn rekker_kort(&mut self, ui: &mut egui::Ui, spill: Spill) {

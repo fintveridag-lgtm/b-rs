@@ -1080,6 +1080,62 @@ pub fn analyser(spill: Spill, trekninger: &[Trekning]) -> Result<Analyse> {
     })
 }
 
+// ───────────────────────── Gjenganger-analyse ─────────────────────────
+
+/// «Gjenganger-rekka»: de mest trukne tallene i historikken satt sammen til
+/// én rekke. Viktig: den har NØYAKTIG samme vinnersjanse som alle andre
+/// rekker — frekvensene er støy (se chi-kvadraten). Og fordi «varme» tall
+/// er populære blant spillere, deles potten typisk med flere om den vinner.
+pub fn gjenganger_rekke(a: &Analyse) -> Rekke {
+    let spill = a.spill;
+    let mut etter = a.hovedtall.clone();
+    etter.sort_by(|x, y| y.antall.cmp(&x.antall).then(x.tall.cmp(&y.tall)));
+    let mut hovedtall: Vec<u8> = etter
+        .iter()
+        .take(spill.hovedtall_antall())
+        .map(|s| s.tall)
+        .collect();
+    hovedtall.sort_unstable();
+    let mut ekstra: Vec<u8> = {
+        let mut e = a.ekstra.clone();
+        e.sort_by(|x, y| y.antall.cmp(&x.antall).then(x.tall.cmp(&y.tall)));
+        e.iter().take(spill.ekstra_antall()).map(|s| s.tall).collect()
+    };
+    ekstra.sort_unstable();
+    let popularitet = popularitet(&hovedtall, &ekstra, spill);
+    Rekke {
+        hovedtall,
+        ekstra,
+        popularitet,
+        begrunnelse: format!(
+            "de {} mest trukne tallene i {} trekninger — samme vinnersjanse som alle andre rekker",
+            spill.hovedtall_antall(),
+            a.antall_trekninger
+        ),
+    }
+}
+
+/// Vinnerrekker (hovedtallene) som har forekommet mer enn én gang i
+/// historikken, med datoene de ble trukket.
+pub fn gjentatte_rekker(trekninger: &[Trekning]) -> Vec<(Vec<u8>, Vec<NaiveDate>)> {
+    let mut kart: BTreeMap<Vec<u8>, Vec<NaiveDate>> = BTreeMap::new();
+    for t in trekninger {
+        let mut n = t.hovedtall.clone();
+        n.sort_unstable();
+        kart.entry(n).or_default().push(t.dato);
+    }
+    kart.into_iter().filter(|(_, datoer)| datoer.len() > 1).collect()
+}
+
+/// Forventet antall gjentatte vinnerrekker ved ren tilfeldighet
+/// (bursdagsparadokset): n·(n−1)/2 delt på antall mulige hovedtall-rekker.
+pub fn forventet_gjentak(antall_trekninger: usize, spill: Spill) -> f64 {
+    let mulige =
+        kombinasjoner(spill.hovedtall_maks() as u128, spill.hovedtall_antall() as u128) as f64;
+    let n = antall_trekninger as f64;
+    n * (n - 1.0) / 2.0 / mulige
+}
+
 // ─────────────────────── «Beste rekker»-generatoren ───────────────────────
 
 /// En foreslått rekke med poengsum og begrunnelse.
@@ -1463,6 +1519,32 @@ mod tester {
             let igjen = beste_rekker(spill, 10, 42);
             assert_eq!(rekker[0].hovedtall, igjen[0].hovedtall);
         }
+    }
+
+    #[test]
+    fn gjenganger_rekke_og_gjentak_regnes_riktig() {
+        // Historikk der 1–7 alltid trekkes pluss varierende utfyll — og én
+        // eksakt rekke som gjentas.
+        let d = |dag: u32| NaiveDate::from_ymd_opt(2020, 1, dag).unwrap();
+        let trekninger = vec![
+            Trekning { dato: d(1), hovedtall: vec![1, 2, 3, 4, 5, 6, 7], ekstra: vec![] },
+            Trekning { dato: d(2), hovedtall: vec![1, 2, 3, 4, 5, 6, 8], ekstra: vec![] },
+            Trekning { dato: d(3), hovedtall: vec![1, 2, 3, 4, 5, 6, 9], ekstra: vec![] },
+            Trekning { dato: d(4), hovedtall: vec![7, 6, 5, 4, 3, 2, 1], ekstra: vec![] },
+        ];
+        let a = analyser(Spill::Lotto, &trekninger).unwrap();
+        let hot = gjenganger_rekke(&a);
+        // 1–6 er med i alle fire; 7 i to — de sju mest trukne er 1..=7.
+        assert_eq!(hot.hovedtall, vec![1, 2, 3, 4, 5, 6, 7]);
+
+        let gjentak = gjentatte_rekker(&trekninger);
+        assert_eq!(gjentak.len(), 1, "1-7 er trukket to ganger (ulik rekkefølge)");
+        assert_eq!(gjentak[0].0, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(gjentak[0].1.len(), 2);
+
+        // Bursdagsparadoks-forventningen: n=4 → 6 par av 5 379 616 mulige.
+        let forventet = forventet_gjentak(4, Spill::Lotto);
+        assert!((forventet - 6.0 / 5_379_616.0).abs() < 1e-12);
     }
 
     #[test]
