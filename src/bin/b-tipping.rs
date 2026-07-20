@@ -71,7 +71,7 @@ fn tolk_valg(args: &[String]) -> anyhow::Result<Valg> {
     let naa = chrono::Local::now().date_naive();
     let mut valg = Valg {
         spill: Spill::ALLE.to_vec(),
-        mappe: PathBuf::from("data/tipping"),
+        mappe: tipping::standard_mappe(),
         fra_aar: naa.year() - 30,
         endepunkt: None,
         rekker: 10,
@@ -103,7 +103,9 @@ fn tolk_valg(args: &[String]) -> anyhow::Result<Valg> {
 
 fn hent(args: &[String]) -> anyhow::Result<()> {
     let valg = tolk_valg(args)?;
+    tipping::migrer_gammel_mappe(&valg.mappe);
     println!("({})", tipping::KILDE_VERSJON);
+    println!("Lagres permanent i: {}", valg.mappe.display());
     let fra_dato = NaiveDate::from_ymd_opt(valg.fra_aar, 1, 1).unwrap();
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {

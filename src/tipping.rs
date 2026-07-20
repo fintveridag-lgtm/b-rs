@@ -147,6 +147,28 @@ pub fn csv_sti(mappe: &Path, spill: Spill) -> PathBuf {
     mappe.join(format!("{}.csv", spill.api_navn()))
 }
 
+/// Fast, permanent datamappe i brukerprofilen — samme sted uansett hvor
+/// programmet startes fra, så historikken lagres «for alltid» og bygges opp
+/// over tid. Windows: `%APPDATA%\b-tipping`. macOS/Linux: `~/.b-tipping`
+/// (eller `$XDG_DATA_HOME/b-tipping` når den er satt). Faller tilbake til
+/// `data/tipping` bare hvis ingen hjemmemappe finnes.
+pub fn standard_mappe() -> PathBuf {
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h)))
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from));
+    match base {
+        // Skjult mappe i hjemmekatalogen på Unix; vanlig mappe under APPDATA.
+        Some(dir) => {
+            let skjul = std::env::var_os("APPDATA").is_none()
+                && std::env::var_os("XDG_DATA_HOME").is_none();
+            dir.join(if skjul { ".b-tipping" } else { "b-tipping" })
+        }
+        None => PathBuf::from("data/tipping"),
+    }
+}
+
 /// Skriv historikken som CSV: `dato;hovedtall;ekstra` (tall kommaseparert).
 pub fn skriv_csv(sti: &Path, trekninger: &[Trekning]) -> Result<()> {
     if let Some(forelder) = sti.parent() {
@@ -176,6 +198,24 @@ pub fn oppdater_csv(sti: &Path, nye: Vec<Trekning>) -> Result<usize> {
     alle.dedup_by_key(|t| t.dato);
     skriv_csv(sti, &alle)?;
     Ok(alle.len())
+}
+
+/// Flytt eventuell historikk fra en gammel mappe inn i den nye (fletter, så
+/// ingenting går tapt). Kjøres én gang ved oppstart for å ta vare på data
+/// som ble lastet ned før den faste lagringsplassen ble tatt i bruk.
+pub fn migrer_gammel_mappe(ny: &Path) {
+    let gammel = Path::new("data/tipping");
+    if gammel == ny || !gammel.exists() {
+        return;
+    }
+    for spill in Spill::ALLE {
+        let fra = csv_sti(gammel, spill);
+        if let Ok(trekninger) = les_csv(&fra) {
+            if !trekninger.is_empty() {
+                let _ = oppdater_csv(&csv_sti(ny, spill), trekninger);
+            }
+        }
+    }
 }
 
 /// Les historikk fra CSV; ukjente/ødelagte linjer hoppes over med telling.

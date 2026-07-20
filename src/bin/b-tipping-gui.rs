@@ -70,7 +70,7 @@ impl TippingApp {
         let fro = chrono::Local::now().date_naive().num_days_from_ce() as u64;
         let mut app = TippingApp {
             rt: tokio::runtime::Runtime::new().expect("tokio-runtime"),
-            mappe: PathBuf::from("data/tipping"),
+            mappe: tipping::standard_mappe(),
             valgt: Spill::Lotto,
             analyser: HashMap::new(),
             historikk: HashMap::new(),
@@ -80,6 +80,7 @@ impl TippingApp {
             melding: None,
             vis_gjengangere: false,
         };
+        tipping::migrer_gammel_mappe(&app.mappe);
         app.les_historikk();
         app.lag_rekker();
         app
@@ -270,6 +271,20 @@ impl TippingApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new(tipping::KILDE_VERSJON).color(BORDER).size(11.0));
                     });
+                });
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("💾 Historikk lagres permanent i: {}", self.mappe.display()))
+                            .color(GRAY)
+                            .size(11.0),
+                    );
+                    if ui
+                        .small_button("Åpne mappe")
+                        .on_hover_text("Åpne mappen der trekningshistorikken lagres")
+                        .clicked()
+                    {
+                        aapne_mappe(&self.mappe);
+                    }
                 });
             });
     }
@@ -633,6 +648,17 @@ fn load_icon() -> Option<egui::IconData> {
         .into_rgba8();
     let (width, height) = img.dimensions();
     Some(egui::IconData { rgba: img.into_raw(), width, height })
+}
+
+/// Åpne en mappe i systemets filutforsker (best effort, feil ignoreres).
+fn aapne_mappe(mappe: &std::path::Path) {
+    let _ = std::fs::create_dir_all(mappe);
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer").arg(mappe).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(mappe).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(mappe).spawn();
 }
 
 fn med_skilletegn(n: u128) -> String {
