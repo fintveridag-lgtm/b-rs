@@ -16,6 +16,10 @@ cargo run --bin b-tipping -- analyse         # statistikk + 10 foreslåtte rekke
 cargo run --bin b-tipping -- analyse lotto --rekker 10 --fro 42
 ```
 
+Vil du **dele appen med andre** eller bruke den på en annen PC? Se
+[DELE_APPEN.md](DELE_APPEN.md) — du kan sende selve programfilen eller la
+andre bygge den selv. (Appen er en skrivebordsapp og kjører ikke på telefon.)
+
 **`b-tipping-gui`** er en egen vindusapp (uten konsollvindu på Windows):
 faner for Lotto/Vikinglotto/Eurojackpot, «Hent historikk»-knapp som laster
 ned i bakgrunnen med fremdrift, frekvensgraf med forventningslinje,
