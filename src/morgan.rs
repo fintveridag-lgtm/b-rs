@@ -442,8 +442,88 @@ pub async fn autopilot_decide(backend: &Backend, context_json: &str) -> Result<A
     parse_autopilot_decision(&text)
 }
 
+/// Speider-prompt for duo-modus: en billig, rask modell (Ollama) ser på hver
+/// puls og avgjør bare OM det er verdt å vekke den dyre hjernen (Claude).
+const SCOUT_PROMPT: &str = r#"Du er en rask markedsspeider for en daytrader. Du får et JSON-øyeblikksbilde av ett instrument (kurs, RSI, siste kurser, posisjon). Din ENESTE jobb er å avgjøre om situasjonen er verdt en grundig vurdering fra sjefsanalytikeren akkurat nå.
+
+Svar KUN med et JSON-objekt, uten annen tekst:
+{"interessant": true | false, "hvorfor": "<kort>"}
+
+Sett interessant=true hvis: tydelig trend/brudd, RSI under 35 eller over 65, kraftig bevegelse siste lys, ELLER det finnes en åpen posisjon som kan trenge stell. Ellers false (rolig marked, ingen posisjon). Vær nøktern — de fleste pulser er false."#;
+
+/// Speiderens vurdering: er situasjonen verdt et dyrt beslutningskall?
+pub(crate) fn parse_scout(text: &str) -> (bool, String) {
+    let parsed = (|| {
+        let start = text.find('{')?;
+        let end = text.rfind('}')?;
+        let v: Value = serde_json::from_str(&text[start..=end]).ok()?;
+        let interessant = v.get("interessant").and_then(Value::as_bool)?;
+        let hvorfor = v.get("hvorfor").and_then(Value::as_str).unwrap_or("").to_string();
+        Some((interessant, hvorfor))
+    })();
+    // Ved uklart svar: vekk sjefen (bedre å bruke et kall for mye enn å sove).
+    parsed.unwrap_or((true, "uklart speider-svar".into()))
+}
+
+/// La speideren (billig modell) vurdere om pulsen er verdt et dyrt kall.
+async fn scout_market(scout: &Backend, context_json: &str) -> (bool, String) {
+    let user = format!("Øyeblikksbilde (JSON):\n{context_json}\n\nVerdt en grundig vurdering nå?");
+    match call_llm(scout, SCOUT_PROMPT, &user, 300).await {
+        Ok(text) => parse_scout(&text),
+        Err(_) => (true, "speideren svarte ikke".into()), // fall trygt tilbake
+    }
+}
+
+/// Bygg autopilotens hjerne(r) fra dens egen provider-innstilling.
+/// Returnerer (beslutningstaker, valgfri speider for duo-modus).
+fn autopilot_backends(cfg: &crate::config::Config) -> Result<(Backend, Option<Backend>)> {
+    let provider = cfg.morgan.autopilot.provider.trim();
+    match provider {
+        // duo: Ollama speider, Claude beslutter.
+        "duo" => {
+            let scout = Backend::Ollama {
+                url: cfg.morgan.ollama_url.clone(),
+                model: cfg.morgan.ollama_model.clone(),
+            };
+            let key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
+                anyhow::anyhow!(
+                    "duo-modus krever ANTHROPIC_API_KEY (Claude beslutter). Sett nøkkelen, eller velg ollama/claude alene."
+                )
+            })?;
+            Ok((Backend::Claude { api_key: key }, Some(scout)))
+        }
+        "ollama" => Ok((
+            Backend::Ollama {
+                url: cfg.morgan.ollama_url.clone(),
+                model: cfg.morgan.ollama_model.clone(),
+            },
+            None,
+        )),
+        "claude" => {
+            let key = std::env::var("ANTHROPIC_API_KEY")
+                .map_err(|_| anyhow::anyhow!("claude-hjerne krever ANTHROPIC_API_KEY"))?;
+            Ok((Backend::Claude { api_key: key }, None))
+        }
+        // tom = arv fra [morgan] provider.
+        _ => Ok((backend(&cfg.morgan)?, None)),
+    }
+}
+
+/// Én linje i daytraderens beslutningsjournal.
+fn journal(st: &mut UiState, klokke: &str, tekst: String) {
+    st.autopilot_status = Some(format!("{klokke} {tekst}"));
+    st.autopilot_journal.push(format!("{klokke}  {tekst}"));
+    // Behold dagens økt lesbar — de siste 100 linjene holder lenge.
+    let n = st.autopilot_journal.len();
+    if n > 100 {
+        st.autopilot_journal.drain(0..n - 100);
+    }
+}
+
 /// Bakgrunnsoppgaven: vurder symbolet med jevne mellomrom og legg eventuelle
 /// ordrer i den manuelle køen (risikosjekkes og utføres av motoren).
+/// Duo-modus: en billig speider (Ollama) filtrerer hver puls, og den dyre
+/// hjernen (Claude) tilkalles bare når noe ser interessant ut.
 pub async fn autopilot_task(
     cfg: crate::config::Config,
     state: crate::state::SharedState,
@@ -452,54 +532,74 @@ pub async fn autopilot_task(
     use std::sync::atomic::Ordering;
 
     let ap = cfg.morgan.autopilot.clone();
-    let backend = match backend(&cfg.morgan) {
+    let (decider, scout) = match autopilot_backends(&cfg) {
         Ok(b) => b,
         Err(e) => {
-            state.lock().unwrap().log(format!("🤖 Autopilot kunne ikke starte: {e:#}"));
+            state.lock().unwrap().log(format!("🤖 Daytrader kunne ikke starte: {e:#}"));
             return;
         }
+    };
+    let interval_min = ap.interval_min.max(5);
+    let hjerne = match &scout {
+        Some(s) => format!("{} speider → {} beslutter", s.label(), decider.label()),
+        None => decider.label(),
     };
     {
         let mut st = state.lock().unwrap();
         st.log(format!(
-            "🤖 Morgan Autopilot PÅ: {} med budsjett {:.0} kr, vurdering hvert {}. minutt, maks {} handler/dag ({}).",
-            ap.symbol,
-            ap.budget_kr,
-            ap.interval_min.max(15),
-            ap.max_trades_per_day,
-            backend.label()
+            "🤖 Morgan Daytrader PÅ: {} · budsjett {:.0} kr · hvert {interval_min}. min · maks {} handler/dag · {hjerne}.",
+            ap.symbol, ap.budget_kr, ap.max_trades_per_day
         ));
         st.autopilot_status = Some("Venter på første vurdering …".into());
     }
 
-    let mut interval =
-        tokio::time::interval(std::time::Duration::from_secs(ap.interval_min.max(15) * 60));
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_min * 60));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     let mut trades_today: u32 = 0;
     let mut trades_date = String::new();
+    let mut day_realized: f64 = 0.0; // ca. realisert gevinst/tap i dag (kr)
+    let mut cost_basis: f64 = 0.0; // snittkjøpskurs (kr) for autopilotens beholdning
+    let mut own_qty: f64 = 0.0; // antall autopiloten selv har kjøpt
+    let mut cooldown_until: Option<std::time::Instant> = None;
+    let mut last_reasons: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     while !flags.quit.load(Ordering::Relaxed) {
         interval.tick().await;
         if flags.quit.load(Ordering::Relaxed) {
             break;
         }
-        // Kill switch og strategipause stopper også autopiloten.
         if flags.killed.load(Ordering::Relaxed) || flags.paused.load(Ordering::Relaxed) {
             continue;
         }
 
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         if trades_date != today {
-            trades_date = today;
+            trades_date = today.clone();
             trades_today = 0;
+            day_realized = 0.0;
+            last_reasons.clear();
+            state.lock().unwrap().autopilot_journal.clear();
+        }
+        let klokke = chrono::Local::now().format("%H:%M").to_string();
+
+        // Dagstap-brems: er dagen tapt, hviler vi til i morgen.
+        if ap.max_day_loss_kr > 0.0 && day_realized <= -ap.max_day_loss_kr {
+            let mut st = state.lock().unwrap();
+            if st.autopilot_status.as_deref().is_none_or(|s| !s.contains("dagstap")) {
+                journal(&mut st, &klokke, format!(
+                    "🛑 Dagstap-bremsen slo inn ({day_realized:.0} kr) — hviler til i morgen."
+                ));
+            }
+            continue;
         }
 
-        // Bygg øyeblikksbildet fra appens egne data.
+        // Bygg øyeblikksbildet fra appens egne data (intradag-lys + hukommelse).
         let (ctx_json, price_nok, held_qty) = {
             let st = state.lock().unwrap();
             let Some(q) = st.quotes.get(&ap.symbol) else {
                 drop(st);
-                continue; // kursen er ikke hentet ennå
+                continue;
             };
             let rate = if q.currency.is_empty() {
                 1.0
@@ -510,25 +610,37 @@ pub async fn autopilot_task(
             let pos = st.positions.iter().find(|p| p.symbol == ap.symbol);
             let held_qty = pos.map_or(0.0, |p| p.qty);
             let held_value = pos.map_or(0.0, |p| p.qty * p.last);
-            let closes: Vec<f64> = st
-                .history
+            // Daytraderen ser på 5-minutterslys (samme som strategimotoren).
+            let intraday: Vec<f64> = st
+                .candles_intraday
                 .get(&ap.symbol)
-                .map(|h| h.iter().rev().take(48).rev().map(|&(_, p)| p).collect())
+                .map(|c| c.iter().rev().take(50).rev().map(|b| b.close).collect())
                 .unwrap_or_default();
+            let closes: Vec<f64> = if intraday.is_empty() {
+                st.history
+                    .get(&ap.symbol)
+                    .map(|h| h.iter().rev().take(50).rev().map(|&(_, p)| p).collect())
+                    .unwrap_or_default()
+            } else {
+                intraday
+            };
             let ctx = json!({
                 "symbol": ap.symbol,
                 "kurs": q.last,
                 "valuta": q.currency,
                 "endring_i_dag_pct": q.change_pct(),
                 "rsi_14": crate::market::rsi(&closes, 14),
-                "siste_kurser": closes,
+                "siste_5min_lys": closes,
                 "posisjon": {"antall": held_qty, "verdi_kr": held_value,
-                              "urealisert_kr": pos.map_or(0.0, |p| p.unrealized())},
+                              "urealisert_kr": pos.map_or(0.0, |p| p.unrealized()),
+                              "min_snittkurs_kr": if own_qty > 0.0 { Some(cost_basis) } else { None }},
                 "budsjett_kr": ap.budget_kr,
                 "ledig_budsjett_kr": (ap.budget_kr - held_value).max(0.0),
                 "kontanter_kr": st.cash,
                 "handler_i_dag": trades_today,
                 "maks_handler_per_dag": ap.max_trades_per_day,
+                "ca_realisert_i_dag_kr": day_realized,
+                "mine_siste_beslutninger": last_reasons.iter().cloned().collect::<Vec<_>>(),
             })
             .to_string();
             (ctx, price_nok, held_qty)
@@ -537,26 +649,44 @@ pub async fn autopilot_task(
             continue;
         }
         if trades_today >= ap.max_trades_per_day {
-            continue; // dagens kvote er brukt
+            let mut st = state.lock().unwrap();
+            journal(&mut st, &klokke, "Dagens handelskvote er brukt — hviler til i morgen.".into());
+            continue;
         }
 
-        let decision = match autopilot_decide(&backend, &ctx_json).await {
+        // Duo-modus: la speideren filtrere først. Er det rolig OG ingen
+        // åpen posisjon å stelle, sparer vi det dyre kallet.
+        if let Some(scout) = &scout {
+            let (interessant, hvorfor) = scout_market(scout, &ctx_json).await;
+            if !interessant && held_qty <= 0.0 {
+                let mut st = state.lock().unwrap();
+                journal(&mut st, &klokke, format!("🔍 Speider: rolig — {hvorfor} (sparer Claude-kallet)."));
+                continue;
+            }
+        }
+
+        let decision = match autopilot_decide(&decider, &ctx_json).await {
             Ok(d) => d,
             Err(e) => {
-                state.lock().unwrap().log(format!("🤖 Autopilot-vurdering feilet: {e:#}"));
+                state.lock().unwrap().log(format!("🤖 Daytrader-vurdering feilet: {e:#}"));
                 continue;
             }
         };
 
-        let klokke = chrono::Local::now().format("%H:%M");
         let mut st = state.lock().unwrap();
         match decision {
             AutopilotDecision::Hold { reason } => {
-                st.autopilot_status = Some(format!("{klokke} AVVENT — {reason}"));
-                st.log(format!("🤖 Autopilot: AVVENT — {reason}"));
+                journal(&mut st, &klokke, format!("AVVENT — {reason}"));
+                last_reasons.push_back(format!("{klokke} AVVENT: {reason}"));
             }
             AutopilotDecision::Buy { amount_kr, reason } => {
-                // Hard grense: aldri over budsjettet, aldri over kontantene.
+                // Kjøletid etter tap: ingen nye kjøp ennå.
+                if let Some(until) = cooldown_until {
+                    if std::time::Instant::now() < until {
+                        journal(&mut st, &klokke, format!("Kjøletid etter tap — hopper over kjøp. ({reason})"));
+                        continue;
+                    }
+                }
                 let held_value = held_qty * price_nok;
                 let ledig = (ap.budget_kr - held_value).max(0.0).min(st.cash);
                 let belop = amount_kr.min(ledig);
@@ -567,35 +697,61 @@ pub async fn autopilot_task(
                 };
                 if qty > 0.0 && belop > 1.0 {
                     trades_today += 1;
+                    // Oppdater egen snittkurs (vektet).
+                    let ny_total = own_qty + qty;
+                    cost_basis = if ny_total > 0.0 {
+                        (cost_basis * own_qty + price_nok * qty) / ny_total
+                    } else {
+                        price_nok
+                    };
+                    own_qty = ny_total;
                     st.manual_orders.push_back((ap.symbol.clone(), crate::types::Side::Buy, qty));
-                    let msg = format!("🤖 Autopilot: KJØP {} for {belop:.0} kr — {reason}", ap.symbol);
-                    st.autopilot_status = Some(format!("{klokke} {msg}"));
-                    st.log(msg.clone());
-                    st.toast(msg);
+                    journal(&mut st, &klokke, format!("🟢 KJØP for {belop:.0} kr @ {price_nok:.0} — {reason}"));
+                    st.toast(format!("🤖 Daytrader: KJØP {} for {belop:.0} kr", ap.symbol));
+                    last_reasons.push_back(format!("{klokke} KJØP: {reason}"));
                 } else {
-                    st.autopilot_status =
-                        Some(format!("{klokke} Ville kjøpt, men budsjettet er fullt — {reason}"));
-                    st.log(format!("🤖 Autopilot: kjøp avvist lokalt (budsjett/kontanter) — {reason}"));
+                    journal(&mut st, &klokke, format!("Ville kjøpt, men budsjettet er fullt — {reason}"));
                 }
             }
             AutopilotDecision::Sell { amount_kr, reason } => {
                 let qty_onsket = amount_kr / price_nok;
-                // Nesten alt? Selg alt — unngå støvposisjoner.
                 let qty = if qty_onsket >= held_qty * 0.9 { held_qty } else { qty_onsket };
                 let qty = if crate::types::is_crypto(&ap.symbol) { qty } else { qty.floor() };
                 if qty > 0.0 && held_qty > 0.0 {
                     trades_today += 1;
+                    // Realisert gevinst/tap mot egen snittkurs (ca.).
+                    let solgt = qty.min(own_qty.max(qty));
+                    let realisert = (price_nok - cost_basis) * solgt.min(own_qty).max(0.0);
+                    if own_qty > 0.0 {
+                        day_realized += realisert;
+                        own_qty = (own_qty - qty).max(0.0);
+                        if own_qty <= 1e-12 {
+                            cost_basis = 0.0;
+                        }
+                        // Tap → kjøletid før neste kjøp.
+                        if realisert < 0.0 && ap.cooldown_min > 0 {
+                            cooldown_until = Some(
+                                std::time::Instant::now()
+                                    + std::time::Duration::from_secs(ap.cooldown_min * 60),
+                            );
+                        }
+                    }
                     st.manual_orders.push_back((ap.symbol.clone(), crate::types::Side::Sell, qty));
-                    let msg = format!("🤖 Autopilot: SELG {} for ca. {:.0} kr — {reason}", ap.symbol, qty * price_nok);
-                    st.autopilot_status = Some(format!("{klokke} {msg}"));
-                    st.log(msg.clone());
-                    st.toast(msg);
+                    let res_txt = if own_qty <= 1e-12 {
+                        format!(" ({}{:.0} kr realisert)", if realisert >= 0.0 { "+" } else { "" }, realisert)
+                    } else {
+                        String::new()
+                    };
+                    journal(&mut st, &klokke, format!("🔴 SELG for ca. {:.0} kr{res_txt} — {reason}", qty * price_nok));
+                    st.toast(format!("🤖 Daytrader: SELG {}", ap.symbol));
+                    last_reasons.push_back(format!("{klokke} SELG: {reason}"));
                 } else {
-                    st.autopilot_status =
-                        Some(format!("{klokke} Ville solgt, men eier ingenting — {reason}"));
-                    st.log(format!("🤖 Autopilot: salg avvist lokalt (ingen beholdning) — {reason}"));
+                    journal(&mut st, &klokke, format!("Ville solgt, men eier ingenting — {reason}"));
                 }
             }
+        }
+        while last_reasons.len() > 6 {
+            last_reasons.pop_front();
         }
     }
 }
@@ -618,6 +774,20 @@ mod tests {
         let text = "Her er min vurdering:\n```json\n{\"beslutning\": \"selg\", \"belop_kr\": -300, \"begrunnelse\": \"overkjøpt\"}\n```\nLykke til!";
         let d = parse_autopilot_decision(text).unwrap();
         assert_eq!(d, AutopilotDecision::Sell { amount_kr: 300.0, reason: "overkjøpt".into() });
+    }
+
+    #[test]
+    fn scout_parses_and_defaults_to_waking_chief() {
+        let (i, _) = parse_scout(r#"{"interessant": true, "hvorfor": "RSI 29"}"#);
+        assert!(i);
+        let (i, _) = parse_scout(r#"prat ```json
+{"interessant": false, "hvorfor": "rolig"}
+``` mer prat"#);
+        assert!(!i);
+        // Uklart/tomt svar → vekk sjefen (fail-safe).
+        let (i, why) = parse_scout("jeg vet ikke");
+        assert!(i);
+        assert!(why.contains("uklart"));
     }
 
     #[test]

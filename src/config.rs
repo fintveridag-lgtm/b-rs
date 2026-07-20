@@ -111,8 +111,8 @@ impl Default for MorganCfg {
     }
 }
 
-/// 🤖 Morgan Autopilot: la AI-en handle ett symbol automatisk innenfor et
-/// lite, hardt budsjett. Eksperimentelt — kjør i papirmodus.
+/// 🤖 Morgan Autopilot/Daytrader: la AI-en handle ett symbol automatisk
+/// innenfor et lite, hardt budsjett. Eksperimentelt — kjør i papirmodus.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct AutopilotCfg {
     #[serde(default)]
@@ -123,12 +123,25 @@ pub struct AutopilotCfg {
     /// Hard grense: samlet beholdning i symbolet får aldri overstige dette.
     #[serde(default = "default_autopilot_budget")]
     pub budget_kr: f64,
-    /// Minutter mellom hver vurdering (minimum 15 håndheves).
+    /// Minutter mellom hver vurdering (minimum 5 håndheves).
     #[serde(default = "default_autopilot_interval")]
     pub interval_min: u64,
     /// Maks antall handler per dag — resten blir AVVENT.
     #[serde(default = "default_autopilot_max_trades")]
     pub max_trades_per_day: u32,
+    /// Hjernen for autopiloten: "" = arv fra [morgan] provider,
+    /// "claude", "ollama", eller "duo" (Ollama speider hver puls og
+    /// tilkaller Claude kun når noe ser interessant ut — billig OG smart).
+    #[serde(default)]
+    pub provider: String,
+    /// Dagstap-brems: taper autopiloten mer enn dette i dag (ca., kr),
+    /// settes den på benken til i morgen. 0 = av.
+    #[serde(default = "default_autopilot_day_loss")]
+    pub max_day_loss_kr: f64,
+    /// Kjøletid etter en tapshandel: ingen nye kjøp før det har gått
+    /// så mange minutter — hindrer «revansje-trading». 0 = av.
+    #[serde(default = "default_autopilot_cooldown")]
+    pub cooldown_min: u64,
 }
 
 impl Default for AutopilotCfg {
@@ -139,8 +152,18 @@ impl Default for AutopilotCfg {
             budget_kr: default_autopilot_budget(),
             interval_min: default_autopilot_interval(),
             max_trades_per_day: default_autopilot_max_trades(),
+            provider: String::new(),
+            max_day_loss_kr: default_autopilot_day_loss(),
+            cooldown_min: default_autopilot_cooldown(),
         }
     }
+}
+
+fn default_autopilot_day_loss() -> f64 {
+    300.0
+}
+fn default_autopilot_cooldown() -> u64 {
+    30
 }
 
 fn default_autopilot_symbol() -> String {

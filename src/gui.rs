@@ -2797,29 +2797,56 @@ impl App {
                 }
 
                 ui.add_space(10.0);
-                section_heading(ui, "🤖 Morgan Autopilot (eksperimentelt)");
+                section_heading(ui, "🤖 Morgan Daytrader (eksperimentelt)");
+                let ap = &mut s.morgan.autopilot;
                 egui::Grid::new("innst_autopilot").min_col_width(190.0).show(ui, |ui| {
-                    ui.label("Autopilot på (krever omstart)");
-                    ui.checkbox(&mut s.morgan.autopilot.enabled, "");
+                    ui.label("Daytrader på (krever omstart)");
+                    ui.checkbox(&mut ap.enabled, "");
                     ui.end_row();
                     ui.label("Symbol (kun dette ene)");
-                    ui.text_edit_singleline(&mut s.morgan.autopilot.symbol);
+                    ui.text_edit_singleline(&mut ap.symbol);
+                    ui.end_row();
+                    ui.label("Hjerne");
+                    let vis = match ap.provider.as_str() {
+                        "claude" => "claude (dyr, best)",
+                        "ollama" => "ollama (gratis, lokal)",
+                        "duo" => "duo (Ollama speider → Claude beslutter)",
+                        _ => "arv fra Morgan-valget over",
+                    };
+                    egui::ComboBox::from_id_salt("innst_ap_provider")
+                        .selected_text(vis)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut ap.provider, String::new(), "arv fra Morgan-valget over");
+                            ui.selectable_value(&mut ap.provider, "ollama".into(), "ollama (gratis, lokal)");
+                            ui.selectable_value(&mut ap.provider, "claude".into(), "claude (dyr, best)");
+                            ui.selectable_value(&mut ap.provider, "duo".into(), "duo (Ollama speider → Claude beslutter)");
+                        });
                     ui.end_row();
                     ui.label("Budsjett (kr, hard grense)");
-                    ui.add(egui::DragValue::new(&mut s.morgan.autopilot.budget_kr).range(100.0..=1_000_000.0).speed(100));
+                    ui.add(egui::DragValue::new(&mut ap.budget_kr).range(100.0..=1_000_000.0).speed(100));
                     ui.end_row();
-                    ui.label("Minutter mellom vurderinger (min 15)");
-                    ui.add(egui::DragValue::new(&mut s.morgan.autopilot.interval_min).range(15..=1440));
+                    ui.label("Minutter mellom vurderinger (min 5)");
+                    ui.add(egui::DragValue::new(&mut ap.interval_min).range(5..=1440));
                     ui.end_row();
                     ui.label("Maks handler per dag");
-                    ui.add(egui::DragValue::new(&mut s.morgan.autopilot.max_trades_per_day).range(1..=20));
+                    ui.add(egui::DragValue::new(&mut ap.max_trades_per_day).range(1..=50));
+                    ui.end_row();
+                    ui.label("Dagstap-brems (kr, 0 = av)")
+                        .on_hover_text("Taper daytraderen mer enn dette i dag, hviler den til i morgen.");
+                    ui.add(egui::DragValue::new(&mut ap.max_day_loss_kr).range(0.0..=1_000_000.0).speed(50));
+                    ui.end_row();
+                    ui.label("Kjøletid etter tap (min, 0 = av)")
+                        .on_hover_text("Ingen nye kjøp før det har gått så lenge etter en tapshandel — hindrer revansje-trading.");
+                    ui.add(egui::DragValue::new(&mut ap.cooldown_min).range(0..=240));
                     ui.end_row();
                 });
                 ui.small(
-                    "AI-en vurderer symbolet med jevne mellomrom og kjøper/selger innenfor budsjettet — \
-                     gjennom risikoreglene, stoppet av kill switch og ⏸ pause. Hver vurdering er ett \
-                     AI-kall (velg gjerne Ollama for gratis drift). EKSPERIMENTELT: kjør i papirmodus. \
-                     Kursene er ~15 min forsinket — dette er ingen pengemaskin.",
+                    "Daytraderen vurderer symbolet med jevne mellomrom og kjøper/selger innenfor budsjettet — \
+                     gjennom risikoreglene, stoppet av kill switch og ⏸ pause. Beslutningene med begrunnelse \
+                     vises i 🧠 Morgan-fanen. HJERNE: «ollama» er gratis men enklere; «claude» er dyr (~1–2 kr \
+                     per vurdering) men skarpest; «duo» lar gratis Ollama speide hver puls og vekker Claude kun \
+                     når noe ser interessant ut — smart OG billig. EKSPERIMENTELT: kjør i papirmodus først. \
+                     Dette er et laboratorium, ikke en pengemaskin.",
                 );
 
                 ui.add_space(10.0);
@@ -3355,8 +3382,9 @@ impl App {
                 };
                 ui.label(RichText::new(hjerne).color(GRAY).small());
 
-                // 🤖 Autopilot-status, når den er på.
+                // 🤖 Daytrader: status + dagens beslutningsjournal.
                 if self.settings.morgan.autopilot.enabled {
+                    let ap = &self.settings.morgan.autopilot;
                     ui.add_space(6.0);
                     egui::Frame::none()
                         .fill(BG_CARD_LIGHT)
@@ -3364,23 +3392,53 @@ impl App {
                         .rounding(egui::Rounding::same(8.0))
                         .inner_margin(egui::Margin::symmetric(12.0, 8.0))
                         .show(ui, |ui| {
+                            let hjerne = match ap.provider.as_str() {
+                                "claude" => "claude",
+                                "ollama" => "ollama",
+                                "duo" => "duo (Ollama→Claude)",
+                                _ => "arv",
+                            };
                             ui.horizontal_wrapped(|ui| {
-                                ui.label(RichText::new("🤖 Autopilot").strong().color(Color32::WHITE));
+                                ui.label(RichText::new("🤖 Daytrader").strong().color(Color32::WHITE));
                                 ui.label(
                                     RichText::new(format!(
-                                        "{} · budsjett {} kr · hvert {}. min · maks {}/dag",
-                                        self.settings.morgan.autopilot.symbol,
-                                        fmt_thousands(self.settings.morgan.autopilot.budget_kr),
-                                        self.settings.morgan.autopilot.interval_min.max(15),
-                                        self.settings.morgan.autopilot.max_trades_per_day
+                                        "{} · budsjett {} kr · hvert {}. min · maks {}/dag · hjerne: {hjerne}",
+                                        ap.symbol,
+                                        fmt_thousands(ap.budget_kr),
+                                        ap.interval_min.max(5),
+                                        ap.max_trades_per_day
                                     ))
                                     .color(TEXT_LIGHT)
                                     .small(),
                                 );
-                                if let Some(status) = &st.autopilot_status {
-                                    ui.label(RichText::new(format!("Siste: {status}")).color(YELLOW).small());
-                                }
                             });
+                            if let Some(status) = &st.autopilot_status {
+                                ui.label(RichText::new(format!("Siste: {status}")).color(YELLOW).small());
+                            }
+                            ui.add_space(4.0);
+                            ui.label(RichText::new("Dagens beslutningsjournal").strong().small().color(GRAY));
+                            if st.autopilot_journal.is_empty() {
+                                ui.small("Ingen beslutninger ennå i dag.");
+                            } else {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("daytrader_journal")
+                                    .max_height(180.0)
+                                    .stick_to_bottom(true)
+                                    .show(ui, |ui| {
+                                        for linje in &st.autopilot_journal {
+                                            let farge = if linje.contains("KJØP") {
+                                                GREEN
+                                            } else if linje.contains("SELG") {
+                                                RED
+                                            } else if linje.contains("🛑") {
+                                                YELLOW
+                                            } else {
+                                                TEXT_LIGHT
+                                            };
+                                            ui.label(RichText::new(linje).small().color(farge).monospace());
+                                        }
+                                    });
+                            }
                         });
                 }
 
@@ -3704,11 +3762,14 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
          eller OLLAMA (helt lokal modell på din egen PC — gratis, privat og offline: installer fra ollama.com \
          og kjør «ollama pull llama3.1:8b». Enklere analyser og mer varierende norsk, men koster ingenting). \
          Uansett hjerne: fundamentaltallene er fra modellens kunnskap — verifiser før handel.\n\
-         🤖 AUTOPILOT (Innstillinger → Morgan): la AI-en handle ETT symbol automatisk innenfor et \
-         lite, hardt budsjett (f.eks. 1 000 kr i BTC-USD). Den vurderer med jevne mellomrom, svarer \
-         KJØP/SELG/AVVENT med begrunnelse (ses i loggen og 🧠-fanen), og alt går gjennom \
-         risikoreglene, kill switch og pause. Eksperimentelt — kjør i papirmodus, og husk at hver \
-         vurdering koster et AI-kall (gratis med Ollama).",
+         🤖 DAYTRADER (Innstillinger → Morgan Daytrader): la AI-en handle ETT symbol automatisk \
+         innenfor et lite, hardt budsjett (f.eks. 1 000 kr i BTC-USD), så ofte som hvert 5. minutt på \
+         5-minutterslys. Velg HJERNE: «ollama» (gratis, lokal), «claude» (dyr, skarpest), eller «duo» \
+         der gratis Ollama speider hver puls og vekker Claude kun når noe ser interessant ut — smart og \
+         billig. Sikkerhetsnett i tillegg til budsjett og maks handler/dag: DAGSTAP-BREMS (hviler resten \
+         av dagen ved for stort tap) og KJØLETID etter en tapshandel (hindrer revansje-trading). Hver \
+         beslutning med begrunnelse føres i en journal i 🧠-fanen. Alt går gjennom risikoreglene, kill \
+         switch og pause. Eksperimentelt — kjør i papirmodus. Dette er et laboratorium, ikke en pengemaskin.",
     ),
     (
         "🗂 Filene appen bruker",

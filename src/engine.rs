@@ -196,9 +196,11 @@ impl Engine {
                         st.candles.insert(symbol.clone(), bars.clone());
                     }
                     self.log(format!("{symbol}: sådd med {} dagers historikk", bars.len()));
-                    // Tidsramme-strategi trenger intradag-lys til seeding
-                    // og backtest — hent dem samtidig.
-                    if self.cfg.strategy.timeframe_min > 0 {
+                    // Tidsramme-strategi og Morgan Daytrader trenger
+                    // intradag-lys — hent dem samtidig for de symbolene.
+                    let er_daytrader_symbol = self.cfg.morgan.autopilot.enabled
+                        && self.cfg.morgan.autopilot.symbol == symbol;
+                    if self.cfg.strategy.timeframe_min > 0 || er_daytrader_symbol {
                         match self.market.history_intraday(&symbol).await {
                             Ok(intra) if !intra.is_empty() => {
                                 self.log(format!(
