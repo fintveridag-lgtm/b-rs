@@ -84,6 +84,17 @@ impl Yahoo {
         parse_kraken_quote(symbol, quote_cur, &v)
     }
 
+    /// Nåværende spread i prosent (ask − bid) for et kryptopar, fra Kraken.
+    /// Grunnlaget for at daytraderen vet hva en runde tur faktisk koster.
+    pub async fn kraken_spread_pct(&self, symbol: &str) -> Result<f64> {
+        let (base, quote_cur) = symbol.split_once('-').context("ikke et kryptopar")?;
+        let _ = quote_cur;
+        let pair = format!("{}{}", if base == "BTC" { "XBT" } else { base }, quote_cur);
+        let url = format!("https://api.kraken.com/0/public/Ticker?pair={pair}");
+        let v = self.get_json(&url).await?;
+        parse_kraken_spread(&v)
+    }
+
     /// Daglige OHLC-stolper, eldst først. Brukes til å så strategien ved
     /// oppstart, som startdata for kursgrafen, og til backtesting.
     pub async fn history_daily(&self, symbol: &str, range: &str) -> Result<Vec<Candle>> {
@@ -225,6 +236,17 @@ fn parse_dividends(result: &Value) -> f64 {
 /// Tolk Krakens ticker-svar: "c" = [siste kurs, volum], "o" = dagens
 /// åpningskurs (brukes som referanse for dagsendringen — krypto handles
 /// døgnet rundt, så «forrige slutt» er uansett et valg).
+/// Spread i prosent fra Krakens ticker: "a"/0 = ask, "b"/0 = bid.
+fn parse_kraken_spread(v: &Value) -> Result<f64> {
+    let result = v.get("result").and_then(Value::as_object).context("uventet svar fra Kraken")?;
+    let (_, t) = result.iter().next().context("tomt svar fra Kraken")?;
+    let ask: f64 = t.pointer("/a/0").and_then(Value::as_str).and_then(|s| s.parse().ok()).context("mangler ask")?;
+    let bid: f64 = t.pointer("/b/0").and_then(Value::as_str).and_then(|s| s.parse().ok()).context("mangler bid")?;
+    anyhow::ensure!(bid > 0.0 && ask >= bid, "ugyldig bid/ask");
+    let mid = (ask + bid) / 2.0;
+    Ok((ask - bid) / mid * 100.0)
+}
+
 fn parse_kraken_quote(symbol: &str, quote_cur: &str, v: &Value) -> Result<Quote> {
     let errors = v.get("error").and_then(Value::as_array).cloned().unwrap_or_default();
     anyhow::ensure!(errors.is_empty(), "Kraken: {errors:?}");
@@ -360,6 +382,17 @@ mod tests {
         assert_eq!(q.currency, "USD");
         // Dagsendring mot åpning: (60123.4/59800 − 1) ≈ +0,54 %.
         assert!((q.change_pct() - 0.5408).abs() < 0.01);
+    }
+
+    #[test]
+    fn kraken_spread_computed() {
+        let v = json!({
+            "error": [],
+            "result": {"XXBTZUSD": {"a": ["60100.0", "1", "1.0"], "b": ["60000.0", "1", "1.0"], "c": ["60050.0", "0.01"]}}
+        });
+        let spread = parse_kraken_spread(&v).unwrap();
+        // (60100 − 60000) / 60050 ≈ 0,167 %.
+        assert!((spread - 0.1665).abs() < 0.01, "fikk {spread}");
     }
 
     #[test]

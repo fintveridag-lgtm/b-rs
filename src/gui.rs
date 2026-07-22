@@ -3416,6 +3416,10 @@ impl App {
                                 ui.label(RichText::new(format!("Siste: {status}")).color(YELLOW).small());
                             }
                             ui.add_space(4.0);
+                            ui.small(
+                                "Handler bare når forventet bevegelse overstiger kostnaden (gebyr + spread), \
+                                 helst med storbilde-trenden, og lærer av sin egen journal fra dag til dag.",
+                            );
                             ui.label(RichText::new("Dagens beslutningsjournal").strong().small().color(GRAY));
                             if st.autopilot_journal.is_empty() {
                                 ui.small("Ingen beslutninger ennå i dag.");

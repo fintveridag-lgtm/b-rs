@@ -389,17 +389,36 @@ async fn call_claude(api_key: &str, system: &str, user: &str, max_tokens: u32) -
 // køen og dermed risikoreglene og kill switch-en, som alt annet.
 // ---------------------------------------------------------------------------
 
-const AUTOPILOT_PROMPT: &str = r#"Du er «Morgan», og forvalter et lite, eksperimentelt handelsbudsjett i ETT instrument for brukeren. Du får et JSON-øyeblikksbilde: kurs, RSI, trend, kurshistorikk, posisjonen din og hvor mye av budsjettet som er ledig.
+const AUTOPILOT_PROMPT: &str = r#"Du er «Morgan», og forvalter et lite, eksperimentelt handelsbudsjett i ETT instrument for brukeren. Du får et JSON-øyeblikksbilde: kurs, RSI, 5-minutterslys, storbilde-trend (1-time), rundtur-kostnad, spread, posisjon, ledig budsjett, din lærdom hittil og dine siste beslutninger.
 
 Svar KUN med et JSON-objekt på nøyaktig denne formen, uten annen tekst:
 {"beslutning": "KJØP" | "SELG" | "AVVENT", "belop_kr": <tall>, "begrunnelse": "<én kort setning på norsk>"}
 
 Regler:
-- belop_kr er beløpet i kroner du vil kjøpe eller selge for. Ved AVVENT: 0.
-- Du kan aldri kjøpe for mer enn "ledig_budsjett_kr", og aldri selge mer enn du eier.
-- Kursdataene er ca. 15 minutter forsinket — intradag-støy er upålitelig. Handle bare på tydelige signaler (klar trend, tydelig oversolgt/overkjøpt); ellers AVVENT.
-- Små gevinster spises av spread og støy: ikke kjøp og selg samme dag uten sterk grunn.
-- Vær disiplinert: AVVENT er som regel riktig svar."#;
+- belop_kr er beløpet i kroner du vil kjøpe/selge for. Ved AVVENT: 0.
+- Du kan aldri kjøpe for mer enn "ledig_budsjett_kr", aldri selge mer enn du eier.
+- KOSTNAD FØRST: en runde tur (kjøp + salg) koster «rundtur_kostnad_pct». Kjøp KUN hvis du tror bevegelsen blir tydelig STØRRE enn denne kostnaden — ellers spiser gebyr og spread gevinsten, og du skal svare AVVENT. Er spread uvanlig vid, vent.
+- IKKE MOT STORBILDET: kjøp helst bare når «storbilde_1time_trend» er opp eller flat. Å kjøpe inn i en fallende storbilde-trend er farlig.
+- STØRRELSE ETTER OVERBEVISNING: svakt/uklart signal → lite beløp (eller AVVENT). Tydelig, sterkt signal → større beløp (opp mot ledig budsjett).
+- Bruk «min_laerdom_hittil» og «mine_siste_beslutninger» — ikke gjenta feil, ikke motsi deg selv hvert kvarter, ikke revansje-handle etter tap.
+- Vær disiplinert: AVVENT er som regel riktig svar. Få, gode handler slår mange små."#;
+
+/// Selvevaluering: Morgan leser gårsdagens journal og trekker ÉN kort lærdom
+/// som mates inn i morgendagens vurderinger. Feiler stille (beholder gammel).
+async fn self_review(
+    backend: &Backend,
+    dato: &str,
+    realisert: f64,
+    journal_linjer: &[String],
+) -> Result<String> {
+    let system = "Du er «Morgan», en daytrader som gransker din egen handelsdag for å bli bedre. Svar med ÉN kort, konkret lærdom på norsk (maks 2 setninger) — hva du bør gjøre mer eller mindre av. Ingen unnskyldninger, bare praktisk lærdom.";
+    let user = format!(
+        "Dato: {dato}. Ca. realisert resultat: {realisert:.0} kr.\nJournal:\n{}\n\nHva er dagens viktigste lærdom?",
+        journal_linjer.join("\n")
+    );
+    let text = call_llm(backend, system, &user, 400).await?;
+    Ok(text.trim().replace('\n', " "))
+}
 
 /// Autopilotens beslutning, tolket fra modellens JSON-svar.
 #[derive(Debug, Clone, PartialEq)]
@@ -528,6 +547,8 @@ pub async fn autopilot_task(
     cfg: crate::config::Config,
     state: crate::state::SharedState,
     flags: std::sync::Arc<crate::state::Flags>,
+    market: std::sync::Arc<crate::marketdata::Yahoo>,
+    store: std::sync::Arc<crate::store::Store>,
 ) {
     use std::sync::atomic::Ordering;
 
@@ -539,6 +560,11 @@ pub async fn autopilot_task(
             return;
         }
     };
+    // Runde tur-kostnad (kjøp + salg): kurtasje × 2 + glidning, i prosent.
+    // Morgan skal ikke handle på bevegelser mindre enn dette.
+    let cost_pct = cfg.backtest.commission_pct * 2.0 + cfg.backtest.slippage_pct;
+    // Gårsdagens/tidligere lærdom fra selvevalueringen, hvis noen.
+    let mut lesson = store.meta_get("daytrader_lesson").unwrap_or_default();
     let interval_min = ap.interval_min.max(5);
     let hjerne = match &scout {
         Some(s) => format!("{} speider → {} beslutter", s.label(), decider.label()),
@@ -575,6 +601,19 @@ pub async fn autopilot_task(
 
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         if trades_date != today {
+            // Ny dag: la Morgan granske gårsdagens journal og trekke lærdom,
+            // som mates inn i dagens vurderinger (selvevaluering).
+            if !trades_date.is_empty() {
+                let journal_i_gar: Vec<String> =
+                    { state.lock().unwrap().autopilot_journal.clone() };
+                if journal_i_gar.len() > 2 {
+                    if let Ok(ny) = self_review(&decider, &trades_date, day_realized, &journal_i_gar).await {
+                        let _ = store.meta_set("daytrader_lesson", &ny);
+                        lesson = ny.clone();
+                        state.lock().unwrap().log(format!("🤖 Daytraderens lærdom fra {trades_date}: {ny}"));
+                    }
+                }
+            }
             trades_date = today.clone();
             trades_today = 0;
             day_realized = 0.0;
@@ -593,6 +632,15 @@ pub async fn autopilot_task(
             }
             continue;
         }
+
+        // Ekte spread fra Kraken (hva en runde tur koster akkurat nå) +
+        // fast kostnadsmodell. Feiler spread-kallet, bruker vi bare kostnaden.
+        let spread_pct = if crate::types::is_crypto(&ap.symbol) {
+            market.kraken_spread_pct(&ap.symbol).await.ok()
+        } else {
+            None
+        };
+        let rundtur_kost_pct = cost_pct + spread_pct.unwrap_or(0.0);
 
         // Bygg øyeblikksbildet fra appens egne data (intradag-lys + hukommelse).
         let (ctx_json, price_nok, held_qty, cash_nok) = {
@@ -622,15 +670,24 @@ pub async fn autopilot_task(
             let intraday: Vec<f64> = st
                 .candles_intraday
                 .get(&ap.symbol)
-                .map(|c| c.iter().rev().take(50).rev().map(|b| b.close).collect())
+                .map(|c| c.iter().rev().take(60).rev().map(|b| b.close).collect())
                 .unwrap_or_default();
             let closes: Vec<f64> = if intraday.is_empty() {
                 st.history
                     .get(&ap.symbol)
-                    .map(|h| h.iter().rev().take(50).rev().map(|&(_, p)| p).collect())
+                    .map(|h| h.iter().rev().take(60).rev().map(|&(_, p)| p).collect())
                     .unwrap_or_default()
             } else {
                 intraday
+            };
+            // Multi-tidsramme: aggreger 5-min til ~1-timeslys (12 lys) og
+            // beskriv den store trenden, så Morgan ikke handler mot den.
+            let time_closes: Vec<f64> =
+                closes.chunks(12).filter(|c| !c.is_empty()).map(|c| *c.last().unwrap()).collect();
+            let stor_trend = match (time_closes.first(), time_closes.last()) {
+                (Some(a), Some(b)) if b > a => "opp",
+                (Some(a), Some(b)) if b < a => "ned",
+                _ => "flat/ukjent",
             };
             let ctx = json!({
                 "symbol": ap.symbol,
@@ -638,7 +695,11 @@ pub async fn autopilot_task(
                 "valuta": q.currency,
                 "endring_i_dag_pct": q.change_pct(),
                 "rsi_14": crate::market::rsi(&closes, 14),
-                "siste_5min_lys": closes,
+                "siste_5min_lys": closes.iter().rev().take(24).rev().collect::<Vec<_>>(),
+                "storbilde_1time_trend": stor_trend,
+                "storbilde_1time_lys": time_closes,
+                "rundtur_kostnad_pct": (rundtur_kost_pct * 100.0).round() / 100.0,
+                "spread_pct_naa": spread_pct.map(|s| (s * 100.0).round() / 100.0),
                 "posisjon": {"antall": held_qty, "verdi_kr": held_value,
                               "urealisert_kr": pos.map_or(0.0, |p| p.unrealized()),
                               "min_snittkurs_kr": if own_qty > 0.0 { Some(cost_basis) } else { None }},
@@ -648,6 +709,7 @@ pub async fn autopilot_task(
                 "handler_i_dag": trades_today,
                 "maks_handler_per_dag": ap.max_trades_per_day,
                 "ca_realisert_i_dag_kr": day_realized,
+                "min_laerdom_hittil": lesson,
                 "mine_siste_beslutninger": last_reasons.iter().cloned().collect::<Vec<_>>(),
             })
             .to_string();

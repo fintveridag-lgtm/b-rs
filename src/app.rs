@@ -189,7 +189,13 @@ pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path
                 st.watchlist.push(symbol);
             }
         }
-        rt.spawn(crate::morgan::autopilot_task(cfg.clone(), state.clone(), flags.clone()));
+        rt.spawn(crate::morgan::autopilot_task(
+            cfg.clone(),
+            state.clone(),
+            flags.clone(),
+            market.clone(),
+            store.clone(),
+        ));
     }
 
     // Referanseindeksen til «slår jeg børsen?»-grafen (stille ved feil).
