@@ -595,7 +595,7 @@ pub async fn autopilot_task(
         }
 
         // Bygg øyeblikksbildet fra appens egne data (intradag-lys + hukommelse).
-        let (ctx_json, price_nok, held_qty) = {
+        let (ctx_json, price_nok, held_qty, cash_nok) = {
             let st = state.lock().unwrap();
             let Some(q) = st.quotes.get(&ap.symbol) else {
                 drop(st);
@@ -609,7 +609,15 @@ pub async fn autopilot_task(
             let price_nok = q.last * rate;
             let pos = st.positions.iter().find(|p| p.symbol == ap.symbol);
             let held_qty = pos.map_or(0.0, |p| p.qty);
-            let held_value = pos.map_or(0.0, |p| p.qty * p.last);
+            // Alt i kroner: beholdningsverdi og kontanter. Kontantsaldoen kan
+            // være i meglerens valuta (USD hos Revolut X) — regn den om, ellers
+            // sammenligner vi kroner med dollar og budsjettet blir feil.
+            let held_value = held_qty * price_nok;
+            let cash_nok = if st.cash_currency.is_empty() || st.cash_currency == "kr" {
+                st.cash
+            } else {
+                st.cash * st.fx_rates.get(&st.cash_currency).copied().unwrap_or(1.0)
+            };
             // Daytraderen ser på 5-minutterslys (samme som strategimotoren).
             let intraday: Vec<f64> = st
                 .candles_intraday
@@ -635,15 +643,15 @@ pub async fn autopilot_task(
                               "urealisert_kr": pos.map_or(0.0, |p| p.unrealized()),
                               "min_snittkurs_kr": if own_qty > 0.0 { Some(cost_basis) } else { None }},
                 "budsjett_kr": ap.budget_kr,
-                "ledig_budsjett_kr": (ap.budget_kr - held_value).max(0.0),
-                "kontanter_kr": st.cash,
+                "ledig_budsjett_kr": (ap.budget_kr - held_value).max(0.0).min(cash_nok),
+                "kontanter_kr": cash_nok,
                 "handler_i_dag": trades_today,
                 "maks_handler_per_dag": ap.max_trades_per_day,
                 "ca_realisert_i_dag_kr": day_realized,
                 "mine_siste_beslutninger": last_reasons.iter().cloned().collect::<Vec<_>>(),
             })
             .to_string();
-            (ctx, price_nok, held_qty)
+            (ctx, price_nok, held_qty, cash_nok)
         };
         if price_nok <= 0.0 {
             continue;
@@ -688,7 +696,8 @@ pub async fn autopilot_task(
                     }
                 }
                 let held_value = held_qty * price_nok;
-                let ledig = (ap.budget_kr - held_value).max(0.0).min(st.cash);
+                // Alt i kroner: aldri over budsjettet, aldri over kontantene.
+                let ledig = (ap.budget_kr - held_value).max(0.0).min(cash_nok);
                 let belop = amount_kr.min(ledig);
                 let qty = if crate::types::is_crypto(&ap.symbol) {
                     belop / price_nok
