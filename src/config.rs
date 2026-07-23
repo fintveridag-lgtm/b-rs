@@ -238,6 +238,14 @@ pub struct NotifyCfg {
     /// Telegram chat-id; bot-token settes i miljøvariabelen TELEGRAM_BOT_TOKEN.
     #[serde(default)]
     pub telegram_chat_id: String,
+    /// Fjernstyring fra mobilen (kun ntfy): send «STOPP» til styre-emnet for
+    /// å utløse kill switch. Av som standard — slås bevisst på.
+    #[serde(default)]
+    pub remote_control: bool,
+    /// Eget, hemmelig ntfy-emne for kommandoer. Tomt = <ntfy_topic>-styr.
+    /// HOLD DETTE HEMMELIG — den som kjenner emnet kan stoppe handelen din.
+    #[serde(default)]
+    pub control_topic: String,
     /// Diskret systemlyd ved utført handel og utløst alarm (kun Windows).
     #[serde(default = "default_true")]
     pub sound: bool,
@@ -257,6 +265,8 @@ impl Default for NotifyCfg {
             ntfy_server: default_ntfy_server(),
             ntfy_topic: String::new(),
             telegram_chat_id: String::new(),
+            remote_control: false,
+            control_topic: String::new(),
             sound: true,
             daily_summary: false,
             day_move_alarm_pct: 0.0,

@@ -2881,6 +2881,13 @@ impl App {
                     ui.label("Telegram chat-id");
                     ui.text_edit_singleline(&mut s.notify.telegram_chat_id);
                     ui.end_row();
+                    ui.label("📱 Fjernstyring fra mobil (ntfy)")
+                        .on_hover_text("Send STOPP/PAUSE/FORTSETT fra ntfy-appen for å styre handelen. Krever omstart.");
+                    ui.checkbox(&mut s.notify.remote_control, "");
+                    ui.end_row();
+                    ui.label("Styre-emne (tomt = <emne>-styr)");
+                    ui.text_edit_singleline(&mut s.notify.control_topic);
+                    ui.end_row();
                     ui.label("Lyd ved handel og alarm");
                     ui.checkbox(&mut s.notify.sound, "");
                     ui.end_row();
@@ -3774,6 +3781,17 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
          av dagen ved for stort tap) og KJØLETID etter en tapshandel (hindrer revansje-trading). Hver \
          beslutning med begrunnelse føres i en journal i 🧠-fanen. Alt går gjennom risikoreglene, kill \
          switch og pause. Eksperimentelt — kjør i papirmodus. Dette er et laboratorium, ikke en pengemaskin.",
+    ),
+    (
+        "📱 Kill switch fra mobilen",
+        "Med ntfy-varsler på kan du STYRE handelen fra telefonen — nyttig når du er borte fra PC-en:\n\
+         1. Slå på «Fjernstyring» i ⚙ Innstillinger → Mobilvarsler (krever ntfy, ikke Telegram).\n\
+         2. Appen lytter på et eget HEMMELIG styre-emne: <ntfy-emnet ditt>-styr (eller det du selv setter).\n\
+         3. Abonner på det samme emnet i ntfy-appen, og SEND en melding dit:\n\
+         STOPP (eller STOP/KILL) = kill switch på, all handel stopper og åpne ordrer kanselleres.\n\
+         PAUSE = pause strategien. FORTSETT (eller START) = gjenoppta alt.\n\
+         Du får en bekreftelse tilbake på mobilen. VIKTIG: styre-emnet er eneste passord — hold det \
+         hemmelig og bruk et annet, ugjettelig navn enn varsel-emnet, ellers kan andre stoppe handelen din.",
     ),
     (
         "🗂 Filene appen bruker",
