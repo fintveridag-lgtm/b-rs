@@ -187,6 +187,92 @@ pub async fn remote_control_task(
     }
 }
 
+/// 📱 Fjernstyring via Telegram: du skriver STOPP/PAUSE/FORTSETT som en
+/// helt vanlig melding til boten din. Enkleste nødbrems å bruke.
+/// Reagerer KUN på meldinger fra ditt eget telegram_chat_id.
+pub async fn telegram_control_task(
+    cfg: NotifyCfg,
+    flags: std::sync::Arc<crate::state::Flags>,
+    state: crate::state::SharedState,
+) {
+    use std::sync::atomic::Ordering;
+
+    let Some(token) = std::env::var("TELEGRAM_BOT_TOKEN").ok() else {
+        state.lock().unwrap().log("📱 Telegram-fjernstyring av: TELEGRAM_BOT_TOKEN mangler.");
+        return;
+    };
+    if cfg.telegram_chat_id.is_empty() {
+        state.lock().unwrap().log("📱 Telegram-fjernstyring av: telegram_chat_id mangler.");
+        return;
+    }
+    state
+        .lock()
+        .unwrap()
+        .log("📱 Telegram-fjernstyring PÅ — skriv STOPP/PAUSE/FORTSETT som melding til boten.");
+
+    // Egen klient med god margin til long-polling (25 s).
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(40))
+        .build()
+    else {
+        return;
+    };
+    let mut offset: i64 = 0;
+
+    while !flags.quit.load(Ordering::Relaxed) {
+        let url = format!(
+            "https://api.telegram.org/bot{token}/getUpdates?timeout=25&offset={offset}"
+        );
+        let resp = match client.get(&url).send().await {
+            Ok(r) => r,
+            Err(_) => {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+        let Ok(v) = resp.json::<serde_json::Value>().await else {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            continue;
+        };
+        let Some(updates) = v.get("result").and_then(|r| r.as_array()) else { continue };
+        for upd in updates {
+            if let Some(id) = upd.get("update_id").and_then(|i| i.as_i64()) {
+                offset = id + 1; // kvitter ut denne så den ikke leses igjen
+            }
+            let msg = upd.get("message").or_else(|| upd.get("channel_post"));
+            let Some(msg) = msg else { continue };
+            // Sikkerhet: bare kommandoer fra DIN egen chat.
+            let chat_id = msg.pointer("/chat/id").map(|c| c.to_string()).unwrap_or_default();
+            if chat_id.trim_matches('"') != cfg.telegram_chat_id.trim() {
+                continue;
+            }
+            let text = msg.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            handle_command(text, &flags, &state, &client, "", "").await;
+            // Bekreft i selve Telegram-chatten.
+            if let Some(reply) = command_reply(text) {
+                let send = format!("https://api.telegram.org/bot{token}/sendMessage");
+                let _ = client
+                    .post(&send)
+                    .json(&json!({"chat_id": cfg.telegram_chat_id, "text": reply}))
+                    .send()
+                    .await;
+            }
+        }
+    }
+}
+
+/// Bekreftelsesteksten for en kommando, eller None hvis ukjent.
+fn command_reply(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_uppercase().as_str() {
+        "STOPP" | "STOP" | "KILL" => Some("⛔ KILL SWITCH slått PÅ — all handel stoppet."),
+        "PAUSE" => Some("⏸ Strategien satt på pause."),
+        "FORTSETT" | "START" | "RESUME" | "GJENOPPTA" => {
+            Some("▶ Handel gjenopptatt (kill switch av, strategi i gang).")
+        }
+        _ => None,
+    }
+}
+
 async fn handle_command(
     raw: &str,
     flags: &std::sync::Arc<crate::state::Flags>,

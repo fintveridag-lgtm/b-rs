@@ -2881,11 +2881,11 @@ impl App {
                     ui.label("Telegram chat-id");
                     ui.text_edit_singleline(&mut s.notify.telegram_chat_id);
                     ui.end_row();
-                    ui.label("📱 Fjernstyring fra mobil (ntfy)")
-                        .on_hover_text("Send STOPP/PAUSE/FORTSETT fra ntfy-appen for å styre handelen. Krever omstart.");
+                    ui.label("📱 Fjernstyring fra mobil")
+                        .on_hover_text("Send STOPP/PAUSE/FORTSETT fra mobilen for å styre handelen. Med Telegram skriver du bare en vanlig melding til boten. Krever omstart.");
                     ui.checkbox(&mut s.notify.remote_control, "");
                     ui.end_row();
-                    ui.label("Styre-emne (tomt = <emne>-styr)");
+                    ui.label("Styre-emne (kun ntfy; tomt = <emne>-styr)");
                     ui.text_edit_singleline(&mut s.notify.control_topic);
                     ui.end_row();
                     ui.label("Lyd ved handel og alarm");
@@ -3784,14 +3784,15 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
     ),
     (
         "📱 Kill switch fra mobilen",
-        "Med ntfy-varsler på kan du STYRE handelen fra telefonen — nyttig når du er borte fra PC-en:\n\
-         1. Slå på «Fjernstyring» i ⚙ Innstillinger → Mobilvarsler (krever ntfy, ikke Telegram).\n\
-         2. Appen lytter på et eget HEMMELIG styre-emne: <ntfy-emnet ditt>-styr (eller det du selv setter).\n\
-         3. Abonner på det samme emnet i ntfy-appen, og SEND en melding dit:\n\
-         STOPP (eller STOP/KILL) = kill switch på, all handel stopper og åpne ordrer kanselleres.\n\
-         PAUSE = pause strategien. FORTSETT (eller START) = gjenoppta alt.\n\
-         Du får en bekreftelse tilbake på mobilen. VIKTIG: styre-emnet er eneste passord — hold det \
-         hemmelig og bruk et annet, ugjettelig navn enn varsel-emnet, ellers kan andre stoppe handelen din.",
+        "Styr handelen fra telefonen når du er borte fra PC-en. Slå på «Fjernstyring» i \
+         ⚙ Innstillinger → Mobilvarsler (krever omstart). Kommandoene er de samme uansett: \
+         STOPP (eller STOP/KILL) = kill switch på (stopper alt, kansellerer ordrer), PAUSE = pause \
+         strategien, FORTSETT (eller START) = gjenoppta alt. Du får en bekreftelse tilbake.\n\n\
+         MED TELEGRAM (enklest): skriv kommandoen som en helt vanlig melding til boten din — som å \
+         tekste en venn. Appen reagerer kun på meldinger fra din egen chat.\n\n\
+         MED NTFY: appen lytter på et eget HEMMELIG styre-emne (<ntfy-emnet ditt>-styr). Send \
+         kommandoen dit. NB: ntfy-mobilappen har ikke alltid en skriveboks — bruk da ntfy.sh/app i \
+         nettleseren, som har en tydelig send-knapp. Styre-emnet er eneste passord — hold det hemmelig.",
     ),
     (
         "🗂 Filene appen bruker",

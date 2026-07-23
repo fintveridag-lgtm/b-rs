@@ -172,13 +172,25 @@ pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path
     )?;
     rt.spawn(engine.run());
 
-    // 📱 Fjernstyring fra mobil (kill switch via ntfy), hvis slått på.
-    if cfg.notify.enabled && cfg.notify.remote_control && cfg.notify.provider == "ntfy" {
-        rt.spawn(crate::notify::remote_control_task(
-            cfg.notify.clone(),
-            flags.clone(),
-            state.clone(),
-        ));
+    // 📱 Fjernstyring fra mobil (kill switch), hvis slått på.
+    if cfg.notify.enabled && cfg.notify.remote_control {
+        match cfg.notify.provider.as_str() {
+            "ntfy" => {
+                rt.spawn(crate::notify::remote_control_task(
+                    cfg.notify.clone(),
+                    flags.clone(),
+                    state.clone(),
+                ));
+            }
+            "telegram" => {
+                rt.spawn(crate::notify::telegram_control_task(
+                    cfg.notify.clone(),
+                    flags.clone(),
+                    state.clone(),
+                ));
+            }
+            _ => {}
+        }
     }
 
     // Sjekk om en nyere versjon er publisert på GitHub (stille ved feil).
