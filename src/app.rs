@@ -116,6 +116,7 @@ pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path
         st.equity_daily = store.load_equity_history().unwrap_or_default();
         st.morgan_archive = store.list_morgan_reports().unwrap_or_default();
         st.council_archive = store.list_council().unwrap_or_default();
+        st.uno_x_report = store.meta_get("uno_x_latest");
         let (n_limits, n_plans) = (st.limit_orders.len(), st.savings_plans.len());
         if n_limits > 0 {
             st.log(format!("{n_limits} ventende limit-ordrer lastet fra forrige økt."));
@@ -245,6 +246,11 @@ pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path
                 }
             }
         });
+    }
+
+    // 🔬 Uno-X: daglig analyseteam + søndagsrådslag, hvis slått på.
+    if cfg.uno_x.enabled {
+        rt.spawn(crate::morgan::uno_x_task(cfg.clone(), state.clone(), flags.clone(), store.clone()));
     }
 
     // Markedsoversikten (mest omsatte, daytrading, fond, ukesanalyse).

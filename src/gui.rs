@@ -2853,6 +2853,37 @@ impl App {
                 );
 
                 ui.add_space(10.0);
+                section_heading(ui, "🔬 Uno-X (analyseteam, eksperimentelt)");
+                egui::Grid::new("innst_unox").min_col_width(190.0).show(ui, |ui| {
+                    ui.label("Uno-X på (krever omstart)");
+                    ui.checkbox(&mut s.uno_x.enabled, "");
+                    ui.end_row();
+                    ui.label("Klokketime for daglig analyse (0–23)");
+                    ui.add(egui::DragValue::new(&mut s.uno_x.hour).range(0..=23));
+                    ui.end_row();
+                    ui.label("Hjerne");
+                    let vis = match s.uno_x.provider.as_str() {
+                        "claude" => "claude",
+                        "ollama" => "ollama (gratis)",
+                        _ => "arv fra Morgan",
+                    };
+                    egui::ComboBox::from_id_salt("innst_unox_provider")
+                        .selected_text(vis)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut s.uno_x.provider, String::new(), "arv fra Morgan");
+                            ui.selectable_value(&mut s.uno_x.provider, "ollama".into(), "ollama (gratis)");
+                            ui.selectable_value(&mut s.uno_x.provider, "claude".into(), "claude");
+                        });
+                    ui.end_row();
+                });
+                ui.small(
+                    "10 agenter jakter kjøpskandidater HVER DAG (etter valgt time) og gir funnene til \
+                     Stanley. Hver SØNDAG holder Morgan og Stanley et ukesrådslag over funnene. Alt logges \
+                     til uno-x-logg.txt ved siden av databasen, og vises i 🗣️ Rådslag-fanen. Koster AI-kall \
+                     per dag — velg «ollama» for gratis drift. Eksperimentelt.",
+                );
+
+                ui.add_space(10.0);
                 section_heading(ui, "Sparemål");
                 egui::Grid::new("innst_maal").min_col_width(190.0).show(ui, |ui| {
                     ui.label("Målbeløp (kr, 0 = av)");
@@ -3545,11 +3576,29 @@ impl App {
                     }
                 });
                 ui.small(
-                    "Morgan (offensiv markedsjeger) og Stanley (rolig risikovokter og livsveileder) \
-                     gransker dagens handler, diskuterer seg imellom, blir enige om hva som er best for \
-                     deg — og Stanley gir deg et livsråd på tampen. AI-generert refleksjon, ikke fasit.",
+                    "🔬 Uno-X (10 agenter) jakter kjøpskandidater hver dag og gir funnene til Stanley, som \
+                     tar dem videre til Morgan for et ukesrådslag hver søndag. Morgan (offensiv) og Stanley \
+                     (rolig risikovokter og livsveileder) diskuterer, blir enige om hva som er best for deg, \
+                     og Stanley gir et livsråd. Alt logges også til uno-x-logg.txt. AI-generert, ikke fasit.",
                 );
                 ui.add_space(8.0);
+
+                // 🔬 Uno-X sine siste daglige funn.
+                if let Some(uno) = st.uno_x_report.clone() {
+                    egui::CollapsingHeader::new(RichText::new("🔬 Uno-X — siste funn").strong())
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            egui::Frame::none()
+                                .fill(BG_CARD)
+                                .stroke(egui::Stroke::new(1.0, BORDER))
+                                .rounding(egui::Rounding::same(8.0))
+                                .inner_margin(egui::Margin::same(12.0))
+                                .show(ui, |ui| {
+                                    markdown_lite(ui, &uno);
+                                });
+                        });
+                    ui.add_space(6.0);
+                }
 
                 ui.horizontal(|ui| {
                     let ready = !st.council_pending;
@@ -3923,7 +3972,12 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
          gransker de to dagens handler, diskuterer seg imellom (du ser dialogen), blir enige om hva \
          som er best for deg akkurat nå, og Stanley gir deg et livsråd på tampen — gjerne om hvordan \
          et menneske lever klokt i en verden der AI styrer mer og mer av markedene. Hvert rådslag \
-         lagres i en logg du kan bla i. Bruker samme hjerne som Morgan (Claude eller Ollama).",
+         lagres i en logg du kan bla i. Bruker samme hjerne som Morgan (Claude eller Ollama).\n\n\
+         🔬 UNO-X: slår du på Uno-X i Innstillinger, jakter et team på 10 spesialiserte agenter \
+         kjøpskandidater HVER DAG (momentum, verdi, utbytte, brudd, rekyl, sektor, vekst, contrarian, \
+         katalysator, kvalitet) og gir en shortliste til Stanley. HVER SØNDAG holder Morgan og Stanley \
+         et ukesrådslag over funnene. Alt skrives også til tekstfilen uno-x-logg.txt ved siden av \
+         databasen, så du har en varig norsk logg over hva de har kommet frem til.",
     ),
     (
         "📱 Kill switch fra mobilen",

@@ -117,6 +117,8 @@ pub struct UiState {
     pub council_error: Option<String>,
     pub council_pending: bool,
     pub council_archive: Vec<(i64, String, String)>,
+    /// 🔬 Uno-X sine siste daglige funn (kjøpskandidater).
+    pub uno_x_report: Option<String>,
     /// 🤖 Autopilotens siste beslutning, klar for visning i GUI-et.
     pub autopilot_status: Option<String>,
     /// 🤖 Daytraderens beslutningsjournal for dagens økt (tid + tekst).
@@ -249,6 +251,7 @@ impl UiState {
             council_error: None,
             council_pending: false,
             council_archive: Vec::new(),
+            uno_x_report: None,
             autopilot_status: None,
             autopilot_journal: Vec::new(),
             cash_currency: "kr".to_string(),

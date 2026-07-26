@@ -313,6 +313,192 @@ pub async fn council(backend: &Backend, context_json: &str) -> Result<String> {
     call_llm(backend, COUNCIL_PROMPT, &user, 8000).await
 }
 
+/// «Uno-X» — et team på 10 spesialiserte agenter som KUN leter etter aksjer
+/// å kjøpe. Hver har sitt felt; sammen leverer de en kort shortliste videre
+/// til Stanley. Ett kall per dag role-spiller hele teamet (holder kostnaden nede).
+const UNOX_PROMPT: &str = r#"Du er «Uno-X», et sammensveiset team på 10 spesialiserte aksjeanalytikere som UTELUKKENDE leter etter aksjer å KJØPE. Dere jobber for én privat investor via handelsappen b-rs, og leverer funnene til analysesjefen Stanley.
+
+De 10 agentene og feltene deres:
+1. Momentum — aksjer i sterk, vedvarende oppgang
+2. Verdi — lav prising mot inntjening/bokførte verdier
+3. Utbytte — solide, bærekraftige utbetalinger
+4. Teknisk brudd — kurs som bryter ut over motstand
+5. Rekyl — oversolgt (lav RSI) med snarlig vending
+6. Sektorrotasjon — sektoren som er på vei inn i favør
+7. Vekst — høy omsetnings-/inntjeningsvekst
+8. Contrarian — upopulære navn markedet undervurderer
+9. Katalysator — kommende rapport/hendelse som kan løfte kursen
+10. Kvalitet — sterk vollgrav og forutsigbar drift
+
+Du får appens markedsdata (Oslo Børs ukesanalyse, mest omsatte, fond/ETF, watchlist-kurser). Skriv på norsk i Markdown:
+
+## 🔬 Uno-X — agentenes funn
+For HVER av de 10 agentene: én linje med agentens navn/felt + 1 konkret kjøpskandidat (tickersymbol) + kort begrunnelse forankret i dataene. Skriv «ingen klar kandidat i dag» hvis feltet ikke gir noe.
+
+## 🏆 Uno-X-shortliste
+De 3–5 sterkeste idéene teamet står SAMLET bak akkurat nå, med ticker og én setnings tese hver — dette er det Stanley tar videre.
+
+Regler: prioriter aksjer fra datagrunnlaget. Vær konkret, ikke dikt opp presise fundamentaltall (merk «ca.»/«ukjent»). Dette er AI-generert research, ikke kjøpsanbefaling."#;
+
+/// Stanley + Morgan gransker ukens Uno-X-funn og diskuterer nyvinningene.
+const WEEKLY_PROMPT: &str = r#"Det er søndag. Analyseteamet «Uno-X» (10 agenter) har levert ukens kjøpsidéer til analysesjefen STANLEY, som nå tar dem med til makkeren MORGAN for et grundig ukesrådslag.
+
+- STANLEY: rolig, skeptisk risikovokter. Mottar Uno-X-funnene, veier dem kritisk.
+- MORGAN: offensiv markedsjeger, ser muligheter og motargumenter.
+
+Du får Uno-X sine funn fra uken + brukerens portefølje og markedsdata. Skriv ALT på norsk i Markdown:
+
+## 🗣️ Ukens rådslag (søndag)
+Ekte dialog (6–10 replikker, «**Stanley:**»/«**Morgan:**») der de går gjennom Uno-X sine idéer, er uenige, og bryner de beste nyvinningene mot hverandre. Stanley skal utfordre risiko; Morgan skal se oppsiden.
+
+## 💡 Nyvinningene vurdert
+For hver av Uno-X sine shortliste-idéer: kort dom (sterk / verdt å følge / hopp over) med begrunnelse.
+
+## ✅ Ukens konklusjon
+2–4 konkrete punkter Morgan og Stanley er enige om at brukeren bør vurdere den kommende uken.
+
+## 🌱 Stanleys ukesråd
+Et kort, klokt livsråd for uken som kommer.
+
+Regler: forankret i dataene, ærlig om usikkerhet. AI-generert refleksjon — ikke finansråd."#;
+
+/// Bygg markedskontekst for Uno-X (samme datagrunnlag som screeningen).
+pub fn uno_x_context(st: &UiState) -> String {
+    market_context(st)
+}
+
+/// Kjør Uno-X sin daglige jakt på kjøpskandidater.
+pub async fn run_uno_x(backend: &Backend, market_json: &str) -> Result<String> {
+    let user = format!("Markedsdata fra appen (JSON):\n{market_json}\n\nLever dagens Uno-X-funn.");
+    call_llm(backend, UNOX_PROMPT, &user, 6000).await
+}
+
+/// Kjør søndagens ukesrådslag over Uno-X sine funn.
+pub async fn weekly_council(backend: &Backend, uno_x_findings: &str, context_json: &str) -> Result<String> {
+    let user = format!(
+        "Uno-X sine funn denne uken:\n{uno_x_findings}\n\nBrukerens portefølje og marked (JSON):\n{context_json}\n\nSkriv ukens søndagsrådslag."
+    );
+    call_llm(backend, WEEKLY_PROMPT, &user, 9000).await
+}
+
+/// Bygg bakenden for Uno-X (egen provider, eller arv fra [morgan]).
+fn uno_x_backend(cfg: &crate::config::Config) -> Result<Backend> {
+    let mut m = cfg.morgan.clone();
+    let p = cfg.uno_x.provider.trim();
+    if !p.is_empty() {
+        m.provider = p.to_string();
+    }
+    backend(&m)
+}
+
+/// Legg en linje i den norske tekstloggen ved siden av databasen.
+fn append_log_file(db_path: &str, filename: &str, header: &str, body: &str) {
+    let dir = std::path::Path::new(db_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    let path = dir.join(filename);
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let stamp = chrono::Local::now().format("%d.%m.%Y %H:%M");
+        let _ = writeln!(f, "\n\n═══════════════════════════════════════════\n{header} — {stamp}\n═══════════════════════════════════════════\n\n{body}");
+    }
+}
+
+/// 🔬 Bakgrunnsoppgaven: Uno-X analyserer hver dag (etter valgt time), og
+/// Morgan/Stanley holder ukesrådslag over funnene hver søndag. Alt logges
+/// til norsk tekstfil (uno-x-logg.txt) og — søndager — til rådslag-arkivet.
+pub async fn uno_x_task(
+    cfg: crate::config::Config,
+    state: crate::state::SharedState,
+    flags: std::sync::Arc<crate::state::Flags>,
+    store: std::sync::Arc<crate::store::Store>,
+) {
+    use chrono::{Datelike, Timelike, Weekday};
+    use std::sync::atomic::Ordering;
+
+    let backend = match uno_x_backend(&cfg) {
+        Ok(b) => b,
+        Err(e) => {
+            state.lock().unwrap().log(format!("🔬 Uno-X kunne ikke starte: {e:#}"));
+            return;
+        }
+    };
+    let hour = cfg.uno_x.hour.min(23);
+    state.lock().unwrap().log(format!(
+        "🔬 Uno-X PÅ — daglig analyse kl. {hour:02}, ukesrådslag søndager ({}).",
+        backend.label()
+    ));
+
+    // Sjekk hvert 5. minutt om det er tid for dagens/ukens kjøring.
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    while !flags.quit.load(Ordering::Relaxed) {
+        interval.tick().await;
+        if flags.quit.load(Ordering::Relaxed) {
+            break;
+        }
+        let now = chrono::Local::now();
+        if now.hour() < hour {
+            continue;
+        }
+        let today = now.format("%Y-%m-%d").to_string();
+
+        // 1) Daglig Uno-X-analyse (én gang per dag).
+        if store.meta_get("uno_x_last_date").as_deref() != Some(today.as_str()) {
+            let market_json = { uno_x_context(&state.lock().unwrap()) };
+            // Vent til markedsdataene faktisk er hentet.
+            if state.lock().unwrap().market.week.is_empty() {
+                continue;
+            }
+            match run_uno_x(&backend, &market_json).await {
+                Ok(report) => {
+                    let _ = store.meta_set("uno_x_last_date", &today);
+                    let _ = store.meta_set("uno_x_latest", &report);
+                    append_log_file(&cfg.db_path, "uno-x-logg.txt", "🔬 UNO-X DAGLIG ANALYSE", &report);
+                    let mut st = state.lock().unwrap();
+                    st.uno_x_report = Some(report);
+                    st.log("🔬 Uno-X leverte dagens funn (se Rådslag-fanen og uno-x-logg.txt).");
+                    st.toast("🔬 Uno-X har levert dagens kjøpskandidater.");
+                }
+                Err(e) => {
+                    state.lock().unwrap().log(format!("🔬 Uno-X-analyse feilet: {e:#}"));
+                }
+            }
+        }
+
+        // 2) Søndagens ukesrådslag over Uno-X sine funn (én gang per uke).
+        if now.weekday() == Weekday::Sun {
+            let week_key = format!("{}-W{:02}", now.iso_week().year(), now.iso_week().week());
+            if store.meta_get("weekly_council_week").as_deref() != Some(week_key.as_str()) {
+                let uno_x_findings = store.meta_get("uno_x_latest").unwrap_or_default();
+                if !uno_x_findings.is_empty() {
+                    let lesson = store.meta_get("daytrader_lesson").unwrap_or_default();
+                    let ctx_json = { council_context(&state.lock().unwrap(), &lesson) };
+                    match weekly_council(&backend, &uno_x_findings, &ctx_json).await {
+                        Ok(report) => {
+                            let _ = store.meta_set("weekly_council_week", &week_key);
+                            let tittel = format!("Søndagsrådslag {}", now.format("%d.%m.%Y"));
+                            let _ = store.save_council(&tittel, &report);
+                            append_log_file(&cfg.db_path, "uno-x-logg.txt", "🗣️ SØNDAGSRÅDSLAG (MORGAN & STANLEY)", &report);
+                            let mut st = state.lock().unwrap();
+                            st.council_report = Some(report);
+                            st.council_archive = store.list_council().unwrap_or_default();
+                            st.log("🗣️ Søndagens ukesrådslag er klart (se Rådslag-fanen og uno-x-logg.txt).");
+                            st.toast("🗣️ Morgan og Stanley har holdt ukesrådslag.");
+                        }
+                        Err(e) => {
+                            state.lock().unwrap().log(format!("🗣️ Ukesrådslag feilet: {e:#}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Kjør full screening — ett kall til valgt bakende.
 pub async fn analyze(backend: &Backend, profile: &str, market_json: &str) -> Result<String> {
     let user = format!(

@@ -55,6 +55,8 @@ pub struct Config {
     pub benchmark: String,
     #[serde(default)]
     pub morgan: MorganCfg,
+    #[serde(default)]
+    pub uno_x: UnoXCfg,
     /// Brukes når broker = "multi": to meglere samtidig, rutet på symboltype.
     #[serde(default)]
     pub multi: MultiCfg,
@@ -98,6 +100,31 @@ pub struct MorganCfg {
     pub ollama_model: String,
     #[serde(default)]
     pub autopilot: AutopilotCfg,
+}
+
+/// 🔬 Uno-X: teamet på 10 agenter som daglig jakter kjøpskandidater, og
+/// Morgan/Stanley-rådslaget hver søndag. Eksperimentelt, koster AI-kall.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct UnoXCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Klokketime (lokal, 0–23) da den daglige analysen kjøres. Standard 17
+    /// (etter børsslutt). Søndagsrådslaget kjøres samme time.
+    #[serde(default = "default_uno_x_hour")]
+    pub hour: u32,
+    /// Hjerne: tom = arv fra [morgan] provider, ellers "claude"/"ollama".
+    #[serde(default)]
+    pub provider: String,
+}
+
+impl Default for UnoXCfg {
+    fn default() -> Self {
+        Self { enabled: false, hour: default_uno_x_hour(), provider: String::new() }
+    }
+}
+
+fn default_uno_x_hour() -> u32 {
+    17
 }
 
 impl Default for MorganCfg {

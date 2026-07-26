@@ -135,3 +135,10 @@ poll_secs = 300
 #                              # duo: Ollama speider hver puls, Claude beslutter
 # max_day_loss_kr = 300.0      # dagstap-brems (0 = av)
 # cooldown_min = 30            # kjøletid etter tapshandel (0 = av)
+
+# 🔬 Uno-X: team på 10 agenter som jakter kjøpskandidater hver dag, +
+# Morgan/Stanley-rådslag hver søndag. Logges til uno-x-logg.txt.
+# [uno_x]
+# enabled = false
+# hour = 17           # klokketime (lokal) for daglig analyse
+# provider = "ollama" # "", "claude" eller "ollama" (gratis)
