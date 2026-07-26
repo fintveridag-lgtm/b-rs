@@ -112,19 +112,23 @@ pub struct UnoXCfg {
     /// (etter børsslutt). Søndagsrådslaget kjøres samme time.
     #[serde(default = "default_uno_x_hour")]
     pub hour: u32,
-    /// Hjerne: tom = arv fra [morgan] provider, ellers "claude"/"ollama".
-    #[serde(default)]
+    /// Hjerne: "ollama" (standard, gratis), "claude", eller tom = arv fra
+    /// [morgan] provider.
+    #[serde(default = "default_uno_x_provider")]
     pub provider: String,
 }
 
 impl Default for UnoXCfg {
     fn default() -> Self {
-        Self { enabled: false, hour: default_uno_x_hour(), provider: String::new() }
+        Self { enabled: false, hour: default_uno_x_hour(), provider: default_uno_x_provider() }
     }
 }
 
 fn default_uno_x_hour() -> u32 {
     17
+}
+fn default_uno_x_provider() -> String {
+    "ollama".to_string()
 }
 
 impl Default for MorganCfg {
