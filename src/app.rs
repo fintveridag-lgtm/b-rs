@@ -115,6 +115,7 @@ pub fn start_with_path(cfg: Config, use_tui: bool, config_path: Option<std::path
         st.savings_plans = store.load_savings_plans().unwrap_or_default();
         st.equity_daily = store.load_equity_history().unwrap_or_default();
         st.morgan_archive = store.list_morgan_reports().unwrap_or_default();
+        st.council_archive = store.list_council().unwrap_or_default();
         let (n_limits, n_plans) = (st.limit_orders.len(), st.savings_plans.len());
         if n_limits > 0 {
             st.log(format!("{n_limits} ventende limit-ordrer lastet fra forrige økt."));

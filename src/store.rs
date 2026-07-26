@@ -75,6 +75,12 @@ impl Store {
                 ts TEXT NOT NULL,
                 title TEXT NOT NULL,
                 report TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS council_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                title TEXT NOT NULL,
+                report TEXT NOT NULL
             );",
         )?;
         Ok(Self { conn: Mutex::new(conn) })
@@ -294,6 +300,45 @@ impl Store {
     pub fn delete_morgan_report(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM morgan_reports WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Arkiver et rådslag mellom Morgan og Stanley.
+    pub fn save_council(&self, title: &str, report: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO council_log (ts, title, report) VALUES (?1, ?2, ?3)",
+            params![chrono::Local::now().format("%d.%m.%Y %H:%M").to_string(), title, report],
+        )?;
+        conn.execute(
+            "DELETE FROM council_log WHERE id NOT IN
+             (SELECT id FROM council_log ORDER BY id DESC LIMIT 60)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_council(&self) -> Result<Vec<(i64, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id, ts, title FROM council_log ORDER BY id DESC")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn load_council(&self, id: i64) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT report FROM council_log WHERE id = ?1", params![id], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    pub fn delete_council(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM council_log WHERE id = ?1", params![id])?;
         Ok(())
     }
 

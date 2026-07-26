@@ -257,6 +257,62 @@ pub async fn analyze_portfolio(backend: &Backend, context_json: &str) -> Result<
     call_llm(backend, PORTFOLIO_PROMPT, &user, 12000).await
 }
 
+/// «Rådslaget»: Morgan og Stanley diskuterer seg imellom. Stanley er den
+/// rolige, skeptiske risiko- og livsveilederen; Morgan den offensive
+/// markedsjegeren. De ender i en felles anbefaling + et livsråd til brukeren.
+const COUNCIL_PROMPT: &str = r#"Du skriver et daglig «rådslag» mellom to tenkte analysesjefer i brukerens handelsapp (b-rs):
+
+- MORGAN: senior aksjeanalytiker, offensiv, ser muligheter, elsker markedet.
+- STANLEY: Morgans rolige makker — skeptisk risikovokter og livsveileder. Han gransker hva Morgan (og daytraderen) har gjort, utfordrer Morgan, og passer på brukerens helhet: risiko, disiplin, og livet utenfor skjermen.
+
+Du får JSON: porteføljen, daytraderens journal og lærdom, og markedsdata. Skriv ALT på norsk i Markdown, med disse seksjonene:
+
+## 🗣️ Dagens rådslag
+En ekte, kort dialog (4–8 replikker) der Morgan og Stanley diskuterer dagens handler og situasjon. Bruk «**Morgan:**» og «**Stanley:**» som replikkmarkører. La dem være uenige og bryne seg på hverandre — Stanley skal utfordre Morgan konkret.
+
+## 🎯 Stanleys råd til Morgan
+2–4 konkrete, praktiske innspill Stanley gir Morgan for å handle bedre/tryggere fremover.
+
+## ✅ Dagens anbefaling til deg
+Enighet: 2–3 konkrete punkter de er enige om at er best for brukeren akkurat nå.
+
+## 🌱 Livsråd fra Stanley
+Et varmt, jordnært livsråd (2–4 setninger). Ta gjerne opp det store bildet: at AI (som Morgan og Stanley selv) i økende grad styrer finansmarkedene, og hva et menneske klokt kan gjøre i en slik verden — diversifisere ferdigheter og relasjoner, ikke la tall styre humøret, holde en hånd på egen økonomi, dyrke det maskiner ikke kan (mennesker, natur, mening). Ærlig og oppmuntrende, ikke dystert.
+
+Regler: Vær konkret og forankret i dataene du får. Dette er AI-generert research og refleksjon — ikke finansråd eller livsfasit. Hold en lun, klok tone."#;
+
+/// Bygg konteksten for rådslaget: portefølje + daytraderens spor.
+pub fn council_context(st: &UiState, daytrader_lesson: &str) -> String {
+    json!({
+        "dato": chrono::Local::now().format("%Y-%m-%d").to_string(),
+        "portefolje": {
+            "egenkapital": st.equity,
+            "kontanter": st.cash,
+            "antall_posisjoner": st.positions.len(),
+            "posisjoner": st.positions.iter().map(|p| json!({
+                "symbol": p.symbol, "antall": p.qty, "verdi": p.market_value(),
+                "urealisert": p.unrealized(),
+            })).collect::<Vec<_>>(),
+        },
+        "daytrader": {
+            "aktiv_symbol": st.quotes.keys().next(),
+            "dagens_journal": st.autopilot_journal,
+            "siste_status": st.autopilot_status,
+            "laerdom_hittil": daytrader_lesson,
+        },
+        "marked": st.market.week.iter().take(8).map(|w| json!({
+            "symbol": w.symbol, "uke_pct": w.week_pct, "rsi": w.rsi, "trend_opp": w.trend_up,
+        })).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+/// Kjør dagens rådslag mellom Morgan og Stanley.
+pub async fn council(backend: &Backend, context_json: &str) -> Result<String> {
+    let user = format!("Her er dagens data (JSON):\n{context_json}\n\nSkriv dagens rådslag.");
+    call_llm(backend, COUNCIL_PROMPT, &user, 8000).await
+}
+
 /// Kjør full screening — ett kall til valgt bakende.
 pub async fn analyze(backend: &Backend, profile: &str, market_json: &str) -> Result<String> {
     let user = format!(

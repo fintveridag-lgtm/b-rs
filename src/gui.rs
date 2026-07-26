@@ -39,6 +39,7 @@ enum View {
     Marked,
     Analyse,
     Morgan,
+    Radslag,
     Kalender,
     Innstillinger,
     Hjelp,
@@ -469,6 +470,7 @@ impl eframe::App for App {
             View::Marked => self.market_view(ctx, &mut st),
             View::Analyse => self.analyse_view(ctx, &mut st),
             View::Morgan => self.morgan_view(ctx, &mut st),
+            View::Radslag => self.council_view(ctx, &mut st),
             View::Kalender => self.calendar_view(ctx, &mut st),
             View::Innstillinger => self.settings_view(ctx, &mut st),
             View::Hjelp => self.help_view(ctx),
@@ -585,6 +587,7 @@ impl App {
                     (View::Marked, "🔥 Markedet"),
                     (View::Analyse, "🔮 Uken"),
                     (View::Morgan, "🧠 Morgan"),
+                    (View::Radslag, "🗣️ Rådslag"),
                     (View::Kalender, "📅 Kalender"),
                     (View::Innstillinger, "⚙ Innstillinger"),
                     (View::Hjelp, "❓ Hjelp"),
@@ -3528,6 +3531,138 @@ impl App {
             });
         });
     }
+
+    /// 🗣️ Rådslaget: Morgan og Stanley diskuterer, gir råd og livstips.
+    fn council_view(&mut self, ctx: &egui::Context, st: &mut UiState) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().id_salt("radslag_scroll").show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.heading(RichText::new("🗣️ Rådslaget — Morgan & Stanley").strong());
+                    if st.council_pending {
+                        ui.spinner();
+                        ui.label(RichText::new("de diskuterer …").color(GRAY));
+                    }
+                });
+                ui.small(
+                    "Morgan (offensiv markedsjeger) og Stanley (rolig risikovokter og livsveileder) \
+                     gransker dagens handler, diskuterer seg imellom, blir enige om hva som er best for \
+                     deg — og Stanley gir deg et livsråd på tampen. AI-generert refleksjon, ikke fasit.",
+                );
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    let ready = !st.council_pending;
+                    if ui
+                        .add_enabled(
+                            ready,
+                            egui::Button::new(RichText::new("🗣️ Kjør dagens rådslag").color(Color32::BLACK).strong())
+                                .fill(GREEN),
+                        )
+                        .clicked()
+                    {
+                        if let Some(backend) = morgan_backend(&self.settings.morgan, st) {
+                            st.council_pending = true;
+                            st.council_error = None;
+                            st.log("🗣️ Morgan og Stanley setter seg ned for et rådslag …");
+                            let lesson = self.store.meta_get("daytrader_lesson").unwrap_or_default();
+                            let ctx_json = crate::morgan::council_context(st, &lesson);
+                            let state = self.state.clone();
+                            let store = self.store.clone();
+                            self.rt.spawn(async move {
+                                let result = crate::morgan::council(&backend, &ctx_json).await;
+                                let mut st = state.lock().unwrap();
+                                st.council_pending = false;
+                                match result {
+                                    Ok(report) => {
+                                        let tittel = format!(
+                                            "Rådslag {}",
+                                            chrono::Local::now().format("%d.%m %H:%M")
+                                        );
+                                        let _ = store.save_council(&tittel, &report);
+                                        st.council_archive = store.list_council().unwrap_or_default();
+                                        st.council_report = Some(report);
+                                        st.toast("🗣️ Rådslaget er ferdig.");
+                                        st.log("🗣️ Morgan og Stanley ble enige.");
+                                    }
+                                    Err(e) => {
+                                        let msg = format!("{e:#}");
+                                        st.log(format!("🗣️ Rådslaget feilet: {msg}"));
+                                        st.council_error = Some(msg);
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    ui.label(
+                        RichText::new(format!("hjerne: {} · krever ANTHROPIC_API_KEY eller Ollama", crate::morgan::MODEL))
+                            .color(GRAY)
+                            .small(),
+                    );
+                });
+
+                if let Some(err) = &st.council_error {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(format!("⚠ {err}")).color(RED));
+                }
+
+                if let Some(report) = st.council_report.clone() {
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        section_heading(ui, "Dagens rådslag");
+                        if ui.button("📋 Kopier").clicked() {
+                            ctx.copy_text(report.clone());
+                            st.toast("Rådslaget er kopiert.");
+                        }
+                    });
+                    ui.add_space(4.0);
+                    egui::Frame::none()
+                        .fill(BG_CARD)
+                        .stroke(egui::Stroke::new(1.0, BORDER))
+                        .rounding(egui::Rounding::same(10.0))
+                        .shadow(card_shadow())
+                        .inner_margin(egui::Margin::same(14.0))
+                        .show(ui, |ui| {
+                            markdown_lite(ui, &report);
+                        });
+                }
+
+                // Logg: tidligere rådslag, klikk for å lese igjen.
+                if !st.council_archive.is_empty() {
+                    ui.add_space(8.0);
+                    egui::CollapsingHeader::new(
+                        RichText::new(format!("📜 Tidligere rådslag ({})", st.council_archive.len())).strong(),
+                    )
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        let mut open_id: Option<i64> = None;
+                        let mut delete_id: Option<i64> = None;
+                        for (id, ts, title) in &st.council_archive {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("🗑").clicked() {
+                                    delete_id = Some(*id);
+                                }
+                                if ui.link(RichText::new(format!("{ts} — {title}")).small()).clicked() {
+                                    open_id = Some(*id);
+                                }
+                            });
+                        }
+                        if let Some(id) = open_id {
+                            if let Some(report) = self.store.load_council(id) {
+                                st.council_report = Some(report);
+                                st.council_error = None;
+                            }
+                        }
+                        if let Some(id) = delete_id {
+                            let _ = self.store.delete_council(id);
+                            st.council_archive = self.store.list_council().unwrap_or_default();
+                        }
+                    });
+                }
+                ui.add_space(12.0);
+            });
+        });
+    }
 }
 
 /// Dato-akse: rutenettmerker ved midnatt — dag for dag når du ser noen
@@ -3781,6 +3916,14 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
          av dagen ved for stort tap) og KJØLETID etter en tapshandel (hindrer revansje-trading). Hver \
          beslutning med begrunnelse føres i en journal i 🧠-fanen. Alt går gjennom risikoreglene, kill \
          switch og pause. Eksperimentelt — kjør i papirmodus. Dette er et laboratorium, ikke en pengemaskin.",
+    ),
+    (
+        "🗣️ Rådslaget — Morgan & Stanley",
+        "Stanley er Morgans makker: en rolig risikovokter og livsveileder. I 🗣️ Rådslag-fanen \
+         gransker de to dagens handler, diskuterer seg imellom (du ser dialogen), blir enige om hva \
+         som er best for deg akkurat nå, og Stanley gir deg et livsråd på tampen — gjerne om hvordan \
+         et menneske lever klokt i en verden der AI styrer mer og mer av markedene. Hvert rådslag \
+         lagres i en logg du kan bla i. Bruker samme hjerne som Morgan (Claude eller Ollama).",
     ),
     (
         "📱 Kill switch fra mobilen",

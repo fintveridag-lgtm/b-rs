@@ -112,6 +112,11 @@ pub struct UiState {
     pub news_pending: bool,
     /// Morgans rapportarkiv: (id, tidspunkt, tittel), nyest først.
     pub morgan_archive: Vec<(i64, String, String)>,
+    /// 🗣️ Rådslaget mellom Morgan og Stanley: rapport, status, arkiv.
+    pub council_report: Option<String>,
+    pub council_error: Option<String>,
+    pub council_pending: bool,
+    pub council_archive: Vec<(i64, String, String)>,
     /// 🤖 Autopilotens siste beslutning, klar for visning i GUI-et.
     pub autopilot_status: Option<String>,
     /// 🤖 Daytraderens beslutningsjournal for dagens økt (tid + tekst).
@@ -240,6 +245,10 @@ impl UiState {
             news: Vec::new(),
             news_pending: false,
             morgan_archive: Vec::new(),
+            council_report: None,
+            council_error: None,
+            council_pending: false,
+            council_archive: Vec::new(),
             autopilot_status: None,
             autopilot_journal: Vec::new(),
             cash_currency: "kr".to_string(),
