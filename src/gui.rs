@@ -40,6 +40,7 @@ enum View {
     Analyse,
     Morgan,
     Radslag,
+    Fasit,
     Kalender,
     Innstillinger,
     Hjelp,
@@ -471,6 +472,7 @@ impl eframe::App for App {
             View::Analyse => self.analyse_view(ctx, &mut st),
             View::Morgan => self.morgan_view(ctx, &mut st),
             View::Radslag => self.council_view(ctx, &mut st),
+            View::Fasit => self.fasit_view(ctx, &mut st),
             View::Kalender => self.calendar_view(ctx, &mut st),
             View::Innstillinger => self.settings_view(ctx, &mut st),
             View::Hjelp => self.help_view(ctx),
@@ -588,6 +590,7 @@ impl App {
                     (View::Analyse, "🔮 Uken"),
                     (View::Morgan, "🧠 Morgan"),
                     (View::Radslag, "🗣️ Rådslag"),
+                    (View::Fasit, "📊 Fasit"),
                     (View::Kalender, "📅 Kalender"),
                     (View::Innstillinger, "⚙ Innstillinger"),
                     (View::Hjelp, "❓ Hjelp"),
@@ -3714,6 +3717,118 @@ impl App {
     }
 }
 
+/// 📊 Fasit-tavla: ærlig regnskap over hva alt maskineriet faktisk har gitt,
+/// målt i kroner — din avkastning vs. børsen, realiserte handler og treffrate.
+impl App {
+    fn fasit_view(&mut self, ctx: &egui::Context, st: &mut UiState) {
+        let realized = self.realized(st).to_vec();
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().id_salt("fasit_scroll").show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.heading(RichText::new("📊 Fasit — hva ble det egentlig?").strong());
+                ui.small("Ærlig regnskap i kroner. Tallene lyver ikke — de forteller om maskineriet er verdt tilliten.");
+                ui.add_space(10.0);
+
+                // 1) Din avkastning siden start.
+                let total_kr = st.equity - st.start_cash;
+                let total_pct = if st.start_cash > 0.0 { total_kr / st.start_cash * 100.0 } else { 0.0 };
+                section_heading(ui, "💰 Din avkastning siden start");
+                ui.horizontal(|ui| {
+                    stat_card(ui, "Startkapital", format!("{} kr", fmt_thousands(st.start_cash)), Color32::WHITE);
+                    stat_card(ui, "Egenkapital nå", format!("{} kr", fmt_thousands(st.equity)), Color32::WHITE);
+                    let c = if total_kr >= 0.0 { GREEN } else { RED };
+                    let sign = if total_kr >= 0.0 { "+" } else { "" };
+                    stat_card(ui, "Resultat", format!("{sign}{} kr ({sign}{total_pct:.1} %)", fmt_thousands(total_kr)), c);
+                });
+
+                // 2) Slår du børsen? Portefølje vs. referanseindeks siden start.
+                ui.add_space(12.0);
+                section_heading(ui, "🏁 Slår du børsen?");
+                let mitt_pct = st.equity_daily.first().zip(st.equity_daily.last()).and_then(|(a, b)| {
+                    if a.1 > 0.0 { Some((b.1 / a.1 - 1.0) * 100.0) } else { None }
+                });
+                let start_ts = st.equity_daily.first().map(|p| p.0);
+                let bors_pct = start_ts.and_then(|ts| {
+                    let b0 = st.benchmark.iter().find(|(t, _)| *t >= ts).map(|&(_, v)| v);
+                    let b1 = st.benchmark.last().map(|&(_, v)| v);
+                    match (b0, b1) {
+                        (Some(b0), Some(b1)) if b0 > 0.0 => Some((b1 / b0 - 1.0) * 100.0),
+                        _ => None,
+                    }
+                });
+                match (mitt_pct, bors_pct) {
+                    (Some(m), Some(b)) => {
+                        ui.horizontal(|ui| {
+                            stat_card(ui, "Din portefølje", format!("{:+.1} %", m), if m >= 0.0 { GREEN } else { RED });
+                            let navn = if st.benchmark_name.is_empty() { "Børsen".to_string() } else { st.benchmark_name.clone() };
+                            stat_card(ui, &navn, format!("{:+.1} %", b), if b >= 0.0 { GREEN } else { RED });
+                            let diff = m - b;
+                            stat_card(ui, "Forskjell", format!("{:+.1} %-poeng", diff), if diff >= 0.0 { GREEN } else { RED });
+                        });
+                        ui.add_space(4.0);
+                        if m >= b {
+                            ui.label(RichText::new(format!("✅ Du slår børsen med {:.1} %-poeng i denne perioden. Bra jobba — men gi det tid før du stoler på det.", m - b)).color(GREEN));
+                        } else {
+                            ui.label(RichText::new(format!("📉 Børsen slår deg med {:.1} %-poeng. Et billig indeksfond hadde gitt mer så langt — verdt å tenke på.", b - m)).color(YELLOW));
+                        }
+                    }
+                    _ => {
+                        ui.small("Bygges opp når appen har lagret noen dager med egenkapital og hentet referanseindeksen. Kom tilbake om noen dager.");
+                    }
+                }
+
+                // 3) Realiserte handler: fasit på det som faktisk er solgt.
+                ui.add_space(12.0);
+                section_heading(ui, "✅ Realiserte handler (solgt = låst inn)");
+                if realized.is_empty() {
+                    ui.small("Ingen fullførte kjøp-og-salg ennå. Fasiten kommer når noe er solgt.");
+                } else {
+                    let sum: f64 = realized.iter().map(|r| r.gain).sum();
+                    let vinnere = realized.iter().filter(|r| r.gain > 0.0).count();
+                    let treff = vinnere as f64 / realized.len() as f64 * 100.0;
+                    let beste = realized.iter().max_by(|a, b| a.gain.total_cmp(&b.gain));
+                    let verste = realized.iter().min_by(|a, b| a.gain.total_cmp(&b.gain));
+                    ui.horizontal(|ui| {
+                        let c = if sum >= 0.0 { GREEN } else { RED };
+                        let sign = if sum >= 0.0 { "+" } else { "" };
+                        stat_card(ui, "Realisert totalt", format!("{sign}{} kr", fmt_thousands(sum)), c);
+                        stat_card(ui, "Antall handler", format!("{}", realized.len()), BLUE);
+                        stat_card(ui, "Traff (gevinst)", format!("{vinnere}/{} ({treff:.0} %)", realized.len()), if treff >= 50.0 { GREEN } else { YELLOW });
+                    });
+                    ui.add_space(4.0);
+                    if let Some(b) = beste {
+                        ui.label(RichText::new(format!("🏆 Beste: {} {:+.0} kr", b.symbol, b.gain)).color(GREEN).small());
+                    }
+                    if let Some(w) = verste {
+                        ui.label(RichText::new(format!("📉 Verste: {} {:+.0} kr", w.symbol, w.gain)).color(RED).small());
+                    }
+                    ui.add_space(4.0);
+                    ui.small("Urealiserte posisjoner (ikke solgt ennå) teller ikke her — bare det du faktisk har låst inn. Se 💳 Transaksjoner for skatterapport.");
+                }
+
+                // 4) Ærlig helhetsdom.
+                ui.add_space(12.0);
+                egui::Frame::none()
+                    .fill(BG_CARD_LIGHT)
+                    .stroke(egui::Stroke::new(1.0, BORDER))
+                    .rounding(egui::Rounding::same(10.0))
+                    .inner_margin(egui::Margin::same(14.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("🧭 Ærlig påminnelse").strong().color(Color32::WHITE));
+                        ui.label(RichText::new(
+                            "Kort tid og få handler betyr at flaks dominerer over dyktighet. Døm hverken \
+                             deg selv eller AI-en på noen få uker — se på tallene over måneder, og sammenlign \
+                             alltid mot «hva om jeg bare holdt et indeksfond». Tjener du ikke mer enn børsen \
+                             over tid, er det helt greit å la maskinen være et morsomt laboratorium og pengene \
+                             i et bredt fond.",
+                        ).color(TEXT_LIGHT));
+                    });
+                ui.add_space(12.0);
+            });
+        });
+    }
+}
+
 /// Dato-akse: rutenettmerker ved midnatt — dag for dag når du ser noen
 /// uker, ukesvis på kvartalsvisning, månedsvis på år. Da følger aksen
 /// kalenderen i stedet for «pene» sekundtall som lander midt i døgnet.
@@ -3929,6 +4044,14 @@ const HELP_SECTIONS: &[(&str, &str)] = &[
          Trailing stop: selger hvis kursen faller X % fra toppen etter kjøpet — låser inn gevinst.\n\
          Tapsgrense: all handel stopper hvis porteføljen har tapt mer enn grensen.\n\
          ⛔ KILL SWITCH (knappen øverst): stopper ALT umiddelbart og kansellerer åpne ordrer.",
+    ),
+    (
+        "📊 Fasit-fanen",
+        "Den ærligste fanen i appen: hva ble det EGENTLIG, målt i kroner? Du ser avkastningen din \
+         siden start, om du slår referanseindeksen (Oslo Børs), realiserte handler med treffrate \
+         (hvor stor andel gikk i pluss), samt beste og verste handel. Bruk den til å dømme — kaldt og \
+         i tall, ikke i magefølelse — om AI-en og botene faktisk er verdt tilliten, eller om et bredt \
+         indeksfond hadde vært bedre. Døm over måneder, ikke dager.",
     ),
     (
         "📊 Begreper",
