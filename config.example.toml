@@ -142,3 +142,4 @@ poll_secs = 300
 # enabled = false
 # hour = 17           # klokketime (lokal) for daglig analyse
 # provider = "ollama" # "", "claude" eller "ollama" (gratis)
+# passes = 1          # grundig modus: 2-4 runder → konsensus (mer robust)

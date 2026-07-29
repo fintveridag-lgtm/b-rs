@@ -373,6 +373,44 @@ pub async fn run_uno_x(backend: &Backend, market_json: &str) -> Result<String> {
     call_llm(backend, UNOX_PROMPT, &user, 6000).await
 }
 
+/// Grundig modus: kjør analysen `passes` ganger og slå sammen til konsensus.
+/// AI-svar varierer fra gang til gang, så idéer som går igjen på tvers av
+/// runder er de robuste — det er ekte kvalitetsheving, ikke bare mer støy.
+pub async fn run_uno_x_thorough(backend: &Backend, market_json: &str, passes: u32) -> Result<String> {
+    let passes = passes.clamp(1, 5);
+    if passes == 1 {
+        return run_uno_x(backend, market_json).await;
+    }
+    let mut runder = Vec::new();
+    for i in 1..=passes {
+        match run_uno_x(backend, market_json).await {
+            Ok(r) => runder.push(format!("### Analyserunde {i}\n{r}")),
+            Err(e) => runder.push(format!("### Analyserunde {i}\n(feilet: {e})")),
+        }
+    }
+    let samlet = runder.join("\n\n");
+    let user = format!(
+        "Her er {passes} uavhengige analyser fra Uno-X-teamet av samme marked:\n\n{samlet}\n\nLag konsensus-rapporten."
+    );
+    call_llm(backend, SYNTH_PROMPT, &user, 6000).await
+}
+
+/// Slår sammen flere Uno-X-runder til én skjerpet konsensus-rapport.
+const SYNTH_PROMPT: &str = r#"Du er redaktøren for analyseteamet «Uno-X». Du får flere uavhengige analyserunder av det samme markedet. Din jobb er å finne det ROBUSTE — ikke gjenta alt.
+
+Skriv på norsk i Markdown:
+
+## 🔬 Uno-X — konsensus
+Kort: hvilke kjøpskandidater (tickersymboler) går igjen i FLERE runder? De er de sterkeste. Nevn for hver hvor mange runder som pekte på den, og den samlede tesen.
+
+## 🏆 Uno-X-shortliste (konsensus)
+De 3–5 idéene teamet står samlet bak etter å ha veid rundene mot hverandre — med ticker og én setnings tese. Prioriter det som gikk igjen; forkast tilfeldige engangsinnfall.
+
+## ⚠️ Uenighet
+Kort: hvor spriket rundene? (nyttig å vite hvor teamet er usikkert.)
+
+Regler: vær konkret, ikke dikt opp presise tall, merk usikkerhet. AI-generert research, ikke kjøpsanbefaling."#;
+
 /// Kjør søndagens ukesrådslag over Uno-X sine funn.
 pub async fn weekly_council(backend: &Backend, uno_x_findings: &str, context_json: &str) -> Result<String> {
     let user = format!(
@@ -453,7 +491,7 @@ pub async fn uno_x_task(
             if state.lock().unwrap().market.week.is_empty() {
                 continue;
             }
-            match run_uno_x(&backend, &market_json).await {
+            match run_uno_x_thorough(&backend, &market_json, cfg.uno_x.passes).await {
                 Ok(report) => {
                     let _ = store.meta_set("uno_x_last_date", &today);
                     let _ = store.meta_set("uno_x_latest", &report);

@@ -116,11 +116,20 @@ pub struct UnoXCfg {
     /// [morgan] provider.
     #[serde(default = "default_uno_x_provider")]
     pub provider: String,
+    /// Grundig modus: antall uavhengige analyserunder som slås sammen til
+    /// konsensus (1 = av). 2–4 gir mer robuste funn, men bruker mer tid/kraft.
+    #[serde(default = "default_uno_x_passes")]
+    pub passes: u32,
 }
 
 impl Default for UnoXCfg {
     fn default() -> Self {
-        Self { enabled: false, hour: default_uno_x_hour(), provider: default_uno_x_provider() }
+        Self {
+            enabled: false,
+            hour: default_uno_x_hour(),
+            provider: default_uno_x_provider(),
+            passes: default_uno_x_passes(),
+        }
     }
 }
 
@@ -129,6 +138,9 @@ fn default_uno_x_hour() -> u32 {
 }
 fn default_uno_x_provider() -> String {
     "ollama".to_string()
+}
+fn default_uno_x_passes() -> u32 {
+    1
 }
 
 impl Default for MorganCfg {

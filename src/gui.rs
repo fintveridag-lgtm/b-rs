@@ -2878,12 +2878,19 @@ impl App {
                             ui.selectable_value(&mut s.uno_x.provider, "claude".into(), "claude");
                         });
                     ui.end_row();
+                    ui.label("🧠 Grundig modus: analyserunder (1 = av)")
+                        .on_hover_text("Kjører analysen flere ganger og tar konsensus — idéer som går igjen er de robuste. Mer hjernekraft, men bruker mer tid/kraft per dag.");
+                    ui.add(egui::DragValue::new(&mut s.uno_x.passes).range(1..=5));
+                    ui.end_row();
                 });
                 ui.small(
                     "10 agenter jakter kjøpskandidater HVER DAG (etter valgt time) og gir funnene til \
                      Stanley. Hver SØNDAG holder Morgan og Stanley et ukesrådslag over funnene. Alt logges \
-                     til uno-x-logg.txt ved siden av databasen, og vises i 🗣️ Rådslag-fanen. Koster AI-kall \
-                     per dag — velg «ollama» for gratis drift. Eksperimentelt.",
+                     til uno-x-logg.txt og vises i 🗣️ Rådslag-fanen. Koster AI-kall per dag — «ollama» er \
+                     gratis. GRUNDIG MODUS (runder > 1) kjører analysen flere ganger og finner konsensus = \
+                     mer robuste funn; ekte kvalitetsheving. Vil du ha enda mer hjernekraft: bruk en større \
+                     lokal modell (Innstillinger → Morgan → ollama_model: qwen2.5:14b eller gpt-oss:20b) om \
+                     maskinen tåler det. Eksperimentelt.",
                 );
 
                 ui.add_space(10.0);
