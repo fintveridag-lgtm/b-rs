@@ -302,6 +302,11 @@ fn analyse(args: &[String]) -> anyhow::Result<()> {
                 r.begrunnelse
             );
         }
+
+        println!("\n🧠 AI-panelet diskuterer seg fram til beste rekke:");
+        for (taler, tekst) in tipping::paneldiskusjon(*spill, valg.fro).innlegg {
+            println!("\n  {taler}:\n    {}", ombryt(&tekst, 72, "    "));
+        }
     }
 
     println!(
@@ -310,14 +315,23 @@ fn analyse(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn med_skilletegn(n: u128) -> String {
-    let s = n.to_string();
-    let mut ut = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
-            ut.push(' ');
+/// Enkel ordbryting for terminalen.
+fn ombryt(tekst: &str, bredde: usize, innrykk: &str) -> String {
+    let mut linjer = Vec::new();
+    let mut linje = String::new();
+    for ord in tekst.split_whitespace() {
+        if !linje.is_empty() && linje.chars().count() + 1 + ord.chars().count() > bredde {
+            linjer.push(std::mem::take(&mut linje));
         }
-        ut.push(c);
+        if !linje.is_empty() {
+            linje.push(' ');
+        }
+        linje.push_str(ord);
     }
-    ut
+    if !linje.is_empty() {
+        linjer.push(linje);
+    }
+    linjer.join(&format!("\n{innrykk}"))
 }
+
+use tipping::med_skilletegn;

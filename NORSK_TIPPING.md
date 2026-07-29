@@ -40,6 +40,15 @@ Det analysen gir deg:
 - **Ærlig ramme**: vinnersjansen per spill (Lotto 1 : 5,4 mill,
   Vikinglotto 1 : 61 mill, Eurojackpot 1 : 140 mill) og forventet tap
   (~50 kr per 100 kr spilt) skrives øverst i hver kjøring.
+- **🧠 AI-panel**: flere «agenter» (statistiker, premiedeler, mønster-vokter,
+  balanse-analytiker og ordstyrer) diskuterer seg fram til beste rekke.
+  De optimaliserer det ENESTE som kan optimaliseres — premiedeling — og er
+  krystallklare på at vinnersjansen er lik for alle. Kjører helt lokalt,
+  uten API-nøkkel.
+- **🎟 Mine spill**: før inn dine egne kuponger (spill, dato, tall, innsats,
+  gevinst). Appen sjekker dem automatisk mot nedlastede trekninger (antall
+  rette + gevinstklasse) og viser ditt **reelle netto resultat** over tid —
+  ærlig fasit på hva spillingen koster. Lagres i `mine-spill.csv`.
 
 Datahentingen prøver kilder i rekkefølge til én svarer:
 

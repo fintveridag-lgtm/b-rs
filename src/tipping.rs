@@ -118,6 +118,19 @@ impl Spill {
     }
 }
 
+/// Formater et stort tall med mellomrom som tusenskille: 1234567 → «1 234 567».
+pub fn med_skilletegn(n: u128) -> String {
+    let s = n.to_string();
+    let mut ut = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            ut.push(' ');
+        }
+        ut.push(c);
+    }
+    ut
+}
+
 /// «n over k» — antall måter å velge k av n.
 pub fn kombinasjoner(n: u128, k: u128) -> u128 {
     if k > n {
@@ -1329,6 +1342,247 @@ pub fn beste_rekker(spill: Spill, antall: usize, fro: u64) -> Vec<Rekke> {
     valgte
 }
 
+// ───────────────────────── Det ærlige AI-panelet ─────────────────────────
+//
+// Flere «agenter» med hvert sitt ståsted diskuterer seg fram til en rekke.
+// De diskuterer den ENESTE tingen som faktisk kan optimaliseres —
+// premiedeling — og er krystallklare på at vinnersjansen er lik for alle.
+// Kjører helt lokalt (ingen API-nøkkel, ingen sky), så det alltid virker.
+
+/// Resultatet av en paneldiskusjon: innleggene og rekka de lander på.
+#[derive(Debug, Clone)]
+pub struct PanelResultat {
+    /// (talerens navn, innlegget) i rekkefølge.
+    pub innlegg: Vec<(String, String)>,
+    pub anbefalt: Rekke,
+}
+
+/// Kjør en (deterministisk, frøstyrt) paneldiskusjon for et spill.
+pub fn paneldiskusjon(spill: Spill, fro: u64) -> PanelResultat {
+    // Kandidatene er de samme upopulære rekkene generatoren finner; panelet
+    // resonnerer rundt den beste og en «varm» motpol.
+    let rekker = beste_rekker(spill, 10, fro);
+    let anbefalt = rekker.first().cloned().unwrap_or(Rekke {
+        hovedtall: vec![],
+        ekstra: vec![],
+        popularitet: 0.0,
+        begrunnelse: String::new(),
+    });
+    let h = &anbefalt.hovedtall;
+    let sum: u32 = h.iter().map(|t| *t as u32).sum();
+    let odde = h.iter().filter(|t| *t % 2 == 1).count();
+    let over_31 = h.iter().filter(|t| **t > 31).count();
+    let spredning = h.last().copied().unwrap_or(0) - h.first().copied().unwrap_or(0);
+    let tall_str: Vec<String> = h.iter().map(u8::to_string).collect();
+    let tall_str = tall_str.join(" ");
+
+    let mut innlegg = Vec::new();
+
+    innlegg.push((
+        "🎓 Statistikeren".to_string(),
+        format!(
+            "La oss slå fast premisset først: i {} er det 1 : {} sjanse per rekke, og hver \
+             trekning er uavhengig. «Varme» og «kalde» tall er ren støy — chi-kvadrattesten \
+             viser det hver gang. Så vi kan IKKE gjøre rekka mer sannsynlig. Det eneste vi \
+             kan påvirke, er hvor mange vi må dele en eventuell gevinst med.",
+            spill.navn(),
+            med_skilletegn(spill.kombinasjoner())
+        ),
+    ));
+
+    innlegg.push((
+        "💰 Premiedeler'n".to_string(),
+        format!(
+            "Enig — så da optimaliserer vi for det. Folk flest spiller fødselsdager, altså tall \
+             1–31. Forslaget {tall_str} har {over_31} tall over 31{}. Det trekker rekka bort fra \
+             den store massen av bursdagskuponger, så hvis den vinner, deler vi med færre.",
+            if spill.hovedtall_maks() > 31 {
+                ""
+            } else {
+                " (dette spillet har uansett bare tall opp til 34, så her teller sum og spredning mer)"
+            }
+        ),
+    ));
+
+    innlegg.push((
+        "🔍 Mønster-vokteren".to_string(),
+        format!(
+            "Viktig at det ikke ser «valgt» ut. Jeg sjekket {tall_str}: ingen lang rekkefølge \
+             (1-2-3-4…), ingen opphopning av samme sluttsiffer, og spredning på {spredning} — \
+             tallene ligger godt fordelt, ikke klumpet. Sånne rekker fyller nesten ingen ut for \
+             hånd, og det er akkurat poenget."
+        ),
+    ));
+
+    innlegg.push((
+        "⚖️ Balanse-analytikeren".to_string(),
+        format!(
+            "Summen er {sum} og fordelingen {odde} odde / {} par — midt i det området der de \
+             fleste faktiske vinnerrekker havner, uten å være en «pen» rekke noen bevisst velger. \
+             Det er balansen vi vil ha: statistisk helt vanlig, men upopulær blant spillere.",
+            h.len() - odde
+        ),
+    ));
+
+    innlegg.push((
+        "🧑‍⚖️ Ordstyrer".to_string(),
+        format!(
+            "Konklusjon: vi anbefaler {tall_str}{}. Ikke fordi den er mer sannsynlig — det er ingen \
+             rekke — men fordi den gir minst premiedeling om lykken først er der. Og husk: \
+             forventet tap er ~50 kr per 100 kr spilt uansett hva vi velger. Dette er \
+             underholdning, ikke en investering.",
+            if anbefalt.ekstra.is_empty() {
+                String::new()
+            } else {
+                let e: Vec<String> = anbefalt.ekstra.iter().map(u8::to_string).collect();
+                format!(" + [{}]", e.join(","))
+            }
+        ),
+    ));
+
+    PanelResultat { innlegg, anbefalt }
+}
+
+// ───────────────────────── Egne spill (kuponger) ─────────────────────────
+
+/// En kupong brukeren selv har spilt — for å føre eget reelt resultat.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Kupong {
+    pub dato: NaiveDate,
+    pub spill: Spill,
+    pub hovedtall: Vec<u8>,
+    pub ekstra: Vec<u8>,
+    pub innsats_kr: f64,
+    /// Gevinst i kroner (brukeren fyller inn selv når den er kjent).
+    pub gevinst_kr: f64,
+}
+
+/// Resultatet av å sjekke en kupong mot fasit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KupongResultat {
+    pub hovedtreff: usize,
+    pub ekstratreff: usize,
+    /// Navn på gevinstklassen hvis rekka når en kjent premieklasse.
+    pub premie: Option<String>,
+}
+
+/// Fil for brukerens egne kuponger.
+pub fn kupong_sti(mappe: &Path) -> PathBuf {
+    mappe.join("mine-spill.csv")
+}
+
+/// Skriv kupongene: `dato;spill;hovedtall;ekstra;innsats;gevinst`.
+pub fn skriv_kuponger(sti: &Path, kuponger: &[Kupong]) -> Result<()> {
+    if let Some(forelder) = sti.parent() {
+        std::fs::create_dir_all(forelder)?;
+    }
+    let mut ut = String::from("dato;spill;hovedtall;ekstra;innsats;gevinst\n");
+    for k in kuponger {
+        let hoved: Vec<String> = k.hovedtall.iter().map(|n| n.to_string()).collect();
+        let ekstra: Vec<String> = k.ekstra.iter().map(|n| n.to_string()).collect();
+        ut.push_str(&format!(
+            "{};{};{};{};{};{}\n",
+            k.dato.format("%Y-%m-%d"),
+            k.spill.api_navn(),
+            hoved.join(","),
+            ekstra.join(","),
+            k.innsats_kr,
+            k.gevinst_kr
+        ));
+    }
+    std::fs::write(sti, ut).with_context(|| format!("kunne ikke skrive {}", sti.display()))
+}
+
+/// Les kupongene fra CSV; ødelagte linjer hoppes over.
+pub fn les_kuponger(sti: &Path) -> Vec<Kupong> {
+    let Ok(innhold) = std::fs::read_to_string(sti) else {
+        return Vec::new();
+    };
+    let mut ut = Vec::new();
+    for linje in innhold.lines() {
+        let linje = linje.trim();
+        if linje.is_empty() || linje.starts_with("dato") || linje.starts_with('#') {
+            continue;
+        }
+        let d: Vec<&str> = linje.split(';').collect();
+        if d.len() < 5 {
+            continue;
+        }
+        let (Ok(dato), Some(spill)) = (
+            NaiveDate::parse_from_str(d[0], "%Y-%m-%d"),
+            Spill::fra_navn(d[1]),
+        ) else {
+            continue;
+        };
+        ut.push(Kupong {
+            dato,
+            spill,
+            hovedtall: tall_liste(d[2]),
+            ekstra: tall_liste(d[3]),
+            innsats_kr: d[4].parse().unwrap_or(0.0),
+            gevinst_kr: d.get(5).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+        });
+    }
+    ut
+}
+
+/// Legg til én kupong og lagre.
+pub fn legg_til_kupong(sti: &Path, kupong: Kupong) -> Result<()> {
+    let mut alle = les_kuponger(sti);
+    alle.push(kupong);
+    alle.sort_by_key(|k| k.dato);
+    skriv_kuponger(sti, &alle)
+}
+
+/// Sjekk en kupong mot trekningen på samme dato og spill (om vi har den).
+pub fn vurder_kupong(kupong: &Kupong, trekninger: &[Trekning]) -> Option<KupongResultat> {
+    let fasit = trekninger.iter().find(|t| t.dato == kupong.dato)?;
+    let hovedtreff = kupong.hovedtall.iter().filter(|t| fasit.hovedtall.contains(t)).count();
+    let ekstratreff = kupong.ekstra.iter().filter(|t| fasit.ekstra.contains(t)).count();
+    Some(KupongResultat {
+        hovedtreff,
+        ekstratreff,
+        premie: premieklasse(kupong.spill, hovedtreff, ekstratreff),
+    })
+}
+
+/// Kjent gevinstklasse-navn for et gitt antall treff (konservativt: kun de
+/// klassene som trygt gir premie). `None` = ingen premie.
+fn premieklasse(spill: Spill, hoved: usize, ekstra: usize) -> Option<String> {
+    let navn = match spill {
+        Spill::Lotto => match (hoved, ekstra) {
+            (7, _) => "7 rette",
+            (6, e) if e >= 1 => "6 + tilleggstall",
+            (6, _) => "6 rette",
+            (5, _) => "5 rette",
+            (4, _) => "4 rette",
+            _ => return None,
+        },
+        Spill::Vikinglotto => match (hoved, ekstra) {
+            (6, e) if e >= 1 => "6 + vikingtall",
+            (6, _) => "6 rette",
+            (5, e) if e >= 1 => "5 + vikingtall",
+            (5, _) => "5 rette",
+            (4, _) => "4 rette",
+            (3, _) => "3 rette",
+            _ => return None,
+        },
+        Spill::Eurojackpot => match (hoved, ekstra) {
+            (5, 2) => "5 + 2 stjernetall",
+            (5, 1) => "5 + 1 stjernetall",
+            (5, _) => "5 rette",
+            (4, e) if e >= 1 => "4 + stjernetall",
+            (4, _) => "4 rette",
+            (3, e) if e >= 1 => "3 + stjernetall",
+            (3, _) => "3 rette",
+            (2, 2) => "2 + 2 stjernetall",
+            (1, 2) => "1 + 2 stjernetall",
+            _ => return None,
+        },
+    };
+    Some(navn.to_string())
+}
+
 fn beskriv(hoved: &[u8], spill: Spill) -> String {
     let over_31 = hoved.iter().filter(|t| **t > 31).count();
     let sum: u32 = hoved.iter().map(|t| *t as u32).sum();
@@ -1585,6 +1839,63 @@ mod tester {
         // Bursdagsparadoks-forventningen: n=4 → 6 par av 5 379 616 mulige.
         let forventet = forventet_gjentak(4, Spill::Lotto);
         assert!((forventet - 6.0 / 5_379_616.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn panelet_er_deterministisk_og_anbefaler_beste_rekke() {
+        for spill in Spill::ALLE {
+            let p = paneldiskusjon(spill, 7);
+            assert_eq!(p.innlegg.len(), 5, "{}: fem stemmer", spill.navn());
+            assert!(p.innlegg.iter().all(|(_, tekst)| !tekst.is_empty()));
+            // Anbefalt = den mest upopulære (første) rekka fra generatoren.
+            let beste = beste_rekker(spill, 10, 7);
+            assert_eq!(p.anbefalt.hovedtall, beste[0].hovedtall);
+            // Samme frø → samme diskusjon.
+            assert_eq!(paneldiskusjon(spill, 7).innlegg, p.innlegg);
+        }
+    }
+
+    #[test]
+    fn kupong_vurderes_mot_fasit_og_lagres() {
+        let fasit = vec![Trekning {
+            dato: NaiveDate::from_ymd_opt(2026, 7, 11).unwrap(),
+            hovedtall: vec![3, 7, 11, 16, 18, 24, 30],
+            ekstra: vec![28],
+        }];
+        // 5 hovedtreff + tilleggstall-treff.
+        let kupong = Kupong {
+            dato: NaiveDate::from_ymd_opt(2026, 7, 11).unwrap(),
+            spill: Spill::Lotto,
+            hovedtall: vec![3, 7, 11, 16, 18, 1, 2],
+            ekstra: vec![28],
+            innsats_kr: 50.0,
+            gevinst_kr: 0.0,
+        };
+        let r = vurder_kupong(&kupong, &fasit).unwrap();
+        assert_eq!(r.hovedtreff, 5);
+        assert_eq!(r.ekstratreff, 1);
+        assert_eq!(r.premie.as_deref(), Some("5 rette"));
+
+        // 6 + tilleggstall skal navngis riktig.
+        let seks = Kupong {
+            hovedtall: vec![3, 7, 11, 16, 18, 24, 99],
+            ..kupong.clone()
+        };
+        assert_eq!(vurder_kupong(&seks, &fasit).unwrap().premie.as_deref(), Some("6 + tilleggstall"));
+
+        // Ingen fasit for datoen → None.
+        let annen = Kupong { dato: NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(), ..kupong.clone() };
+        assert!(vurder_kupong(&annen, &fasit).is_none());
+
+        // CSV-rundtur.
+        let mappe = std::env::temp_dir().join("b-tipping-kupong-test");
+        let sti = kupong_sti(&mappe);
+        let _ = std::fs::remove_file(&sti);
+        legg_til_kupong(&sti, kupong.clone()).unwrap();
+        legg_til_kupong(&sti, seks).unwrap();
+        assert_eq!(les_kuponger(&sti).len(), 2);
+        assert_eq!(les_kuponger(&sti)[0], kupong);
+        let _ = std::fs::remove_dir_all(&mappe);
     }
 
     #[test]
