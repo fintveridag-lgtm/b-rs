@@ -20,6 +20,9 @@ pub struct IbkrBroker {
     client: reqwest::Client,
     base: String,
     account: String,
+    limit_orders: bool,
+    limit_slippage_pct: f64,
+    realtime_quotes: bool,
     conid_cache: Mutex<HashMap<String, i64>>,
 }
 
@@ -34,6 +37,9 @@ impl IbkrBroker {
             client,
             base: cfg.base_url.trim_end_matches('/').to_string(),
             account: cfg.account.clone(),
+            limit_orders: cfg.limit_orders,
+            limit_slippage_pct: cfg.limit_slippage_pct,
+            realtime_quotes: cfg.realtime_quotes,
             conid_cache: Mutex::new(HashMap::new()),
         })
     }
@@ -89,15 +95,33 @@ impl Broker for IbkrBroker {
             Side::Buy => "BUY",
             Side::Sell => "SELL",
         };
-        let body = json!({
-            "orders": [{
-                "conid": conid,
-                "orderType": "MKT",
-                "side": side,
-                "quantity": req.qty,
-                "tif": "DAY",
-            }]
-        });
+        // Limit-ordre (tryggest): sett prisen litt forbi siste kurs, så ordren
+        // fylles nær markedet men aldri til en vill pris ved forsinket/tynn data.
+        // Kjøp: maks litt OVER siste. Salg: minst litt UNDER siste.
+        let use_limit = self.limit_orders && req.ref_price > 0.0;
+        let body = if use_limit {
+            let price = limit_price(req.side, req.ref_price, self.limit_slippage_pct);
+            json!({
+                "orders": [{
+                    "conid": conid,
+                    "orderType": "LMT",
+                    "price": price,
+                    "side": side,
+                    "quantity": req.qty,
+                    "tif": "DAY",
+                }]
+            })
+        } else {
+            json!({
+                "orders": [{
+                    "conid": conid,
+                    "orderType": "MKT",
+                    "side": side,
+                    "quantity": req.qty,
+                    "tif": "DAY",
+                }]
+            })
+        };
         let url = format!("{}/iserver/account/{}/orders", self.base, self.account);
         let mut v: Value = self.client.post(&url).json(&body).send().await?
             .error_for_status()?.json().await?;
@@ -189,5 +213,57 @@ impl Broker for IbkrBroker {
         v.pointer("/BASE/cashbalance")
             .and_then(Value::as_f64)
             .context("fant ikke kontantsaldo i IBKR-ledger")
+    }
+
+    /// Sanntids siste-kurs fra IBKR (felt 31). Krever markedsdata-abonnement
+    /// hos IBKR for ekte sanntid; ellers gir gatewayen forsinket kurs. Feiler
+    /// stille (None) så motoren faller tilbake på Yahoo.
+    async fn real_time_price(&self, symbol: &str) -> Option<f64> {
+        if !self.realtime_quotes || crate::types::is_crypto(symbol) {
+            return None;
+        }
+        let conid = self.resolve_conid(symbol).await.ok()?;
+        let url = format!("{}/iserver/marketdata/snapshot?conids={conid}&fields=31", self.base);
+        let v: Value = self.client.get(&url).send().await.ok()?.json().await.ok()?;
+        let raw = v.as_array()?.first()?.get("31")?;
+        // Felt 31 kan være tall eller streng, av og til med prefiks (C/H) når
+        // markedet er stengt — plukk ut selve tallet.
+        let px = match raw {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => {
+                let cleaned: String =
+                    s.chars().filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
+                cleaned.parse().ok()
+            }
+            _ => None,
+        }?;
+        (px > 0.0).then_some(px)
+    }
+}
+
+/// Limit-pris litt forbi siste kurs: kjøp maks litt OVER, salg minst litt
+/// UNDER — så ordren fylles nær markedet, men aldri til en vill pris.
+/// Rundet til to desimaler (gyldig for de fleste aksjer i NOK/USD).
+fn limit_price(side: Side, ref_price: f64, slippage_pct: f64) -> f64 {
+    let slip = slippage_pct / 100.0;
+    let raw = match side {
+        Side::Buy => ref_price * (1.0 + slip),
+        Side::Sell => ref_price * (1.0 - slip),
+    };
+    (raw * 100.0).round() / 100.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limit_price_caps_buy_above_and_sell_below() {
+        // Kjøp: taket litt over siste kurs.
+        assert_eq!(limit_price(Side::Buy, 100.0, 0.3), 100.30);
+        // Salg: gulvet litt under siste kurs.
+        assert_eq!(limit_price(Side::Sell, 100.0, 0.3), 99.70);
+        // Alltid to desimaler.
+        assert_eq!(limit_price(Side::Buy, 123.456, 0.0), 123.46);
     }
 }

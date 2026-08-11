@@ -419,6 +419,22 @@ pub struct IbkrCfg {
     /// Gatewayen bruker selvsignert sertifikat på localhost.
     #[serde(default = "default_true")]
     pub accept_invalid_certs: bool,
+    /// Bruk limit-ordrer i stedet for markedsordrer — beskytter mot stygge
+    /// fyllinger på tynne aksjer/forsinket data. På som standard (tryggest).
+    #[serde(default = "default_true")]
+    pub limit_orders: bool,
+    /// Hvor langt forbi siste kurs limit-prisen settes (%), så ordren fortsatt
+    /// fylles nær markedet men aldri til en vill pris. 0,3 = 0,3 %.
+    #[serde(default = "default_limit_slippage")]
+    pub limit_slippage_pct: f64,
+    /// Hent sanntidskurs fra IBKR for aksjer (i stedet for ~15 min forsinket
+    /// Yahoo). Krever markedsdata-abonnement hos IBKR — ellers fortsatt forsinket.
+    #[serde(default = "default_true")]
+    pub realtime_quotes: bool,
+}
+
+fn default_limit_slippage() -> f64 {
+    0.3
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]

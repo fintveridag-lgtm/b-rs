@@ -396,7 +396,16 @@ impl Engine {
         let mut fresh = Vec::new();
         for symbol in &symbols {
             match self.market.quote(symbol).await {
-                Ok(q) => fresh.push(q),
+                Ok(mut q) => {
+                    // Har megleren en sanntidsfeed (IBKR for aksjer), bruk DEN
+                    // kursen til beslutninger — Yahoo er ~15 min forsinket.
+                    // Metadata (valuta, forrige slutt) beholdes fra Yahoo.
+                    // (change_pct regnes automatisk fra last vs prev_close)
+                    if let Some(px) = self.broker.real_time_price(symbol).await {
+                        q.last = px;
+                    }
+                    fresh.push(q);
+                }
                 Err(e) => self.log(format!("{symbol}: kursfeil: {e:#}")),
             }
         }

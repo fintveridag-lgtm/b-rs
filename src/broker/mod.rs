@@ -25,6 +25,12 @@ pub trait Broker: Send + Sync {
     /// Ny kurs observert — papirmegleren bruker dette til å markere posisjoner.
     async fn on_quote(&self, _symbol: &str, _price: f64) {}
 
+    /// Sanntids siste-kurs for et symbol, hvis megleren har en egen feed
+    /// (IBKR for aksjer). None = ingen egen feed, bruk vanlig kursdata (Yahoo).
+    async fn real_time_price(&self, _symbol: &str) -> Option<f64> {
+        None
+    }
+
     /// Kontoene bak megleren som (navn, kontanter, valuta) — én per
     /// undermegler for multi. Tom liste (standard) betyr «én konto,
     /// bruk cash()» — da slipper enkle meglere et ekstra API-kall.

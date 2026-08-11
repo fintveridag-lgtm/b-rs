@@ -75,6 +75,9 @@ trailing_stop_pct = 0.0       # selg ved −X % fra HØYESTE kurs etter kjøp (0
 # base_url = "https://localhost:5000/v1/api"
 # account = "U1234567"
 # accept_invalid_certs = true   # gatewayen bruker selvsignert sertifikat
+# limit_orders = true           # limit- i stedet for markedsordrer (tryggest)
+# limit_slippage_pct = 0.3      # hvor langt forbi siste kurs limit settes (%)
+# realtime_quotes = true        # sanntidskurs fra IBKR (krever markedsdata-abo)
 
 # Revolut X — krypto. Kreves bare når broker = "revolutx" og mode = "live".
 # Oppsett:

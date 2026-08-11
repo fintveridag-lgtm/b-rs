@@ -66,6 +66,10 @@ impl Broker for MultiBroker {
         self.route(&req.symbol).place_order(req).await
     }
 
+    async fn real_time_price(&self, symbol: &str) -> Option<f64> {
+        self.route(symbol).real_time_price(symbol).await
+    }
+
     async fn cancel_all(&self) -> Result<()> {
         // Kill switch skal nå begge — samle feilene i stedet for å stoppe
         // på første.
