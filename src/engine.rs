@@ -185,8 +185,9 @@ impl Engine {
                 continue;
             }
             self.seeded.insert(symbol.clone());
-            // 2 år: nok til grafens "Alt"-visning og ærlig backtesting.
-            match self.market.history_daily(&symbol, "2y").await {
+            // 5 år: gir grafen lang historikk (5/3/1-års-knappene) og
+            // ærlig backtesting. Yahoo gir dagslys gratis så langt tilbake.
+            match self.market.history_daily(&symbol, "5y").await {
                 Ok(bars) if !bars.is_empty() => {
                     {
                         let mut st = self.state.lock().unwrap();

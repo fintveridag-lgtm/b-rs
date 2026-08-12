@@ -88,6 +88,8 @@ enum ChartRange {
     Month,
     ThreeMonths,
     Year,
+    ThreeYears,
+    FiveYears,
     All,
 }
 
@@ -98,6 +100,8 @@ impl ChartRange {
             ChartRange::Month => Some(30.0 * 86400.0),
             ChartRange::ThreeMonths => Some(92.0 * 86400.0),
             ChartRange::Year => Some(365.0 * 86400.0),
+            ChartRange::ThreeYears => Some(3.0 * 365.0 * 86400.0),
+            ChartRange::FiveYears => Some(5.0 * 365.0 * 86400.0),
             ChartRange::All => None,
         }
     }
@@ -847,7 +851,7 @@ impl App {
                 }
 
                 ui.horizontal(|ui| {
-                    if ui.button("🧪 Backtest (2 år)").clicked() {
+                    if ui.button("🧪 Backtest (5 år)").clicked() {
                         self.backtest = Some(run_backtest(self.selected.as_deref(), &self.strategy_choice, st));
                         self.compare = None;
                     }
@@ -956,7 +960,7 @@ impl App {
                         ui.label(RichText::new(e).color(RED).small());
                     }
                     None => {
-                        ui.small("Test strategien på 2 års historikk før du lar den handle.");
+                        ui.small("Test strategien på 5 års historikk før du lar den handle.");
                     }
                 }
 
@@ -1659,6 +1663,8 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.selectable_value(&mut self.range, ChartRange::All, "Alt");
+                    ui.selectable_value(&mut self.range, ChartRange::FiveYears, "5 år");
+                    ui.selectable_value(&mut self.range, ChartRange::ThreeYears, "3 år");
                     ui.selectable_value(&mut self.range, ChartRange::Year, "1 år");
                     ui.selectable_value(&mut self.range, ChartRange::ThreeMonths, "3 mnd");
                     ui.selectable_value(&mut self.range, ChartRange::Month, "1 mnd");
@@ -4207,7 +4213,7 @@ fn run_backtest(
         return Err("Velg et symbol i watchlisten først.".into());
     };
     // Med tidsramme testes strategien på intradag-lys (5 min, ~60 dager) —
-    // samme oppløsning som den handler på live. Ellers dagslys over 2 år.
+    // samme oppløsning som den handler på live. Ellers dagslys over 5 år.
     let candles = if st.strategy_cfg.timeframe_min > 0 {
         st.candles_intraday
             .get(symbol)
@@ -4238,6 +4244,8 @@ fn chart_explainer(
         ChartRange::Month => "den siste måneden",
         ChartRange::ThreeMonths => "de siste 3 månedene",
         ChartRange::Year => "det siste året",
+        ChartRange::ThreeYears => "de siste 3 årene",
+        ChartRange::FiveYears => "de siste 5 årene",
         ChartRange::All => "hele perioden",
     };
     let mut deler: Vec<String> = Vec::new();
