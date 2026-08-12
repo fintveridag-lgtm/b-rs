@@ -15,8 +15,10 @@ broker = "paper"
 # så det er ingen grunn til å gå under ~15 s.
 poll_secs = 15
 
-# Yahoo Finance-tickere. Oslo Børs har suffiks ".OL".
-watchlist = ["EQNR.OL", "DNB.OL", "NHY.OL", "TEL.OL"]
+# Yahoo Finance-tickere. Suffiks per børs: .OL Oslo, .T Tokyo, .SZ Shenzhen,
+# .SS Shanghai. Uten suffiks = USA. Robot-/Optimus-kurven er tatt med som
+# eksempel (se ROBOT-AKSJER.md) — bytt gjerne ut med dine egne.
+watchlist = ["EQNR.OL", "DNB.OL", "NHY.OL", "TEL.OL", "NVDA", "6324.T", "002050.SZ", "601689.SS"]
 
 # Startkapital i papirmodus. Porteføljen lagres i databasen og
 # gjenopprettes ved oppstart — sett paper_reset = true (for én kjøring)
