@@ -865,8 +865,17 @@ pub async fn autopilot_task(
     let mut trades_today: u32 = 0;
     let mut trades_date = String::new();
     let mut day_realized: f64 = 0.0; // ca. realisert gevinst/tap i dag (kr)
-    let mut cost_basis: f64 = 0.0; // snittkjøpskurs (kr) for autopilotens beholdning
-    let mut own_qty: f64 = 0.0; // antall autopiloten selv har kjøpt
+    // Daytraderens EGEN andel av beholdningen — budsjettet regnes mot denne,
+    // ikke hele posisjonen (mynter kjøpt manuelt skal ikke spise kvoten).
+    // Overlever omstart via meta-nøkler.
+    let mut cost_basis: f64 = store
+        .meta_get("daytrader_cost_basis")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let mut own_qty: f64 = store
+        .meta_get("daytrader_own_qty")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
     let mut cooldown_until: Option<std::time::Instant> = None;
     let mut last_reasons: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
@@ -937,10 +946,18 @@ pub async fn autopilot_task(
             let price_nok = q.last * rate;
             let pos = st.positions.iter().find(|p| p.symbol == ap.symbol);
             let held_qty = pos.map_or(0.0, |p| p.qty);
+            // Er noe av daytraderens andel solgt manuelt, krymper andelen.
+            if own_qty > held_qty {
+                own_qty = held_qty;
+                let _ = store.meta_set("daytrader_own_qty", &own_qty.to_string());
+            }
             // Alt i kroner: beholdningsverdi og kontanter. Kontantsaldoen kan
             // være i meglerens valuta (USD hos Revolut X) — regn den om, ellers
             // sammenligner vi kroner med dollar og budsjettet blir feil.
             let held_value = held_qty * price_nok;
+            // Budsjettet regnes mot daytraderens EGEN andel — BTC du har
+            // kjøpt manuelt skal ikke spise kvoten dens.
+            let own_value = own_qty * price_nok;
             let cash_nok = if st.cash_currency.is_empty() || st.cash_currency == "kr" {
                 st.cash
             } else {
@@ -982,9 +999,11 @@ pub async fn autopilot_task(
                 "spread_pct_naa": spread_pct.map(|s| (s * 100.0).round() / 100.0),
                 "posisjon": {"antall": held_qty, "verdi_kr": held_value,
                               "urealisert_kr": pos.map_or(0.0, |p| p.unrealized()),
+                              "min_andel_antall": own_qty,
+                              "min_andel_verdi_kr": own_value,
                               "min_snittkurs_kr": if own_qty > 0.0 { Some(cost_basis) } else { None }},
                 "budsjett_kr": ap.budget_kr,
-                "ledig_budsjett_kr": (ap.budget_kr - held_value).max(0.0).min(cash_nok),
+                "ledig_budsjett_kr": (ap.budget_kr - own_value).max(0.0).min(cash_nok),
                 "kontanter_kr": cash_nok,
                 "handler_i_dag": trades_today,
                 "maks_handler_per_dag": ap.max_trades_per_day,
@@ -1037,9 +1056,10 @@ pub async fn autopilot_task(
                         continue;
                     }
                 }
-                let held_value = held_qty * price_nok;
-                // Alt i kroner: aldri over budsjettet, aldri over kontantene.
-                let ledig = (ap.budget_kr - held_value).max(0.0).min(cash_nok);
+                // Budsjett mot daytraderens EGEN andel (ikke hele posisjonen):
+                // aldri over budsjettet, aldri over kontantene.
+                let own_value = own_qty * price_nok;
+                let ledig = (ap.budget_kr - own_value).max(0.0).min(cash_nok);
                 let belop = amount_kr.min(ledig);
                 let qty = if crate::types::is_crypto(&ap.symbol) {
                     belop / price_nok
@@ -1056,6 +1076,8 @@ pub async fn autopilot_task(
                         price_nok
                     };
                     own_qty = ny_total;
+                    let _ = store.meta_set("daytrader_own_qty", &own_qty.to_string());
+                    let _ = store.meta_set("daytrader_cost_basis", &cost_basis.to_string());
                     st.manual_orders.push_back((ap.symbol.clone(), crate::types::Side::Buy, qty));
                     journal(&mut st, &klokke, format!("🟢 KJØP for {belop:.0} kr @ {price_nok:.0} — {reason}"));
                     st.toast(format!("🤖 Daytrader: KJØP {} for {belop:.0} kr", ap.symbol));
@@ -1087,6 +1109,8 @@ pub async fn autopilot_task(
                             );
                         }
                     }
+                    let _ = store.meta_set("daytrader_own_qty", &own_qty.to_string());
+                    let _ = store.meta_set("daytrader_cost_basis", &cost_basis.to_string());
                     st.manual_orders.push_back((ap.symbol.clone(), crate::types::Side::Sell, qty));
                     let res_txt = if own_qty <= 1e-12 {
                         format!(" ({}{:.0} kr realisert)", if realisert >= 0.0 { "+" } else { "" }, realisert)
