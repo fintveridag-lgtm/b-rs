@@ -132,7 +132,11 @@ poll_secs = 300
 #
 # [morgan.autopilot]
 # enabled = false
-# symbol = "BTC-USD"           # kun dette ene symbolet
+# symbol = "BTC-USD"           # ett symbol …
+# symbols = ["BTC-USD", "EQNR.OL", "NVDA"]  # … eller flere (papir-eksperiment:
+#                              # Morgan vs. botene). Budsjett/kvoter deles,
+#                              # aksjer kun i åpningstid. Bruk ollama/duo —
+#                              # flere symboler = flere AI-kall.
 # budget_kr = 1000.0           # hard grense for beholdningen
 # interval_min = 20            # minutter mellom vurderinger (min 5)
 # max_trades_per_day = 4

@@ -200,7 +200,7 @@ impl Engine {
                     // Tidsramme-strategi og Morgan Daytrader trenger
                     // intradag-lys — hent dem samtidig for de symbolene.
                     let er_daytrader_symbol = self.cfg.morgan.autopilot.enabled
-                        && self.cfg.morgan.autopilot.symbol == symbol;
+                        && self.cfg.morgan.autopilot.active_symbols().contains(&symbol);
                     if self.cfg.strategy.timeframe_min > 0 || er_daytrader_symbol {
                         match self.market.history_intraday(&symbol).await {
                             Ok(intra) if !intra.is_empty() => {

@@ -181,6 +181,7 @@ pub fn run(deps: GuiDeps) -> Result<()> {
         watch_sort_change: false,
         import_path: String::new(),
         revolutx_pubkey: None,
+        daytrader_symbols_edit: None,
     };
     let result = eframe::run_native(
         "b-rs",
@@ -318,6 +319,8 @@ struct App {
     savings_day: u32,
     /// (antall transaksjoner da cachen ble bygget, realiserte handler).
     realized_cache: (usize, Vec<RealizedTrade>),
+    /// Redigeringsbuffer for daytraderens symbolliste (komma-separert).
+    daytrader_symbols_edit: Option<String>,
     /// Investeringsprofilen brukeren sender til Morgan.
     morgan_profile: String,
     /// Symbolvalget i Morgans dypdykk-nedtrekk.
@@ -2687,6 +2690,7 @@ impl App {
                 ui.add_space(10.0);
 
                 let s = &mut self.settings;
+                let daytrader_buf = &mut self.daytrader_symbols_edit;
                 section_heading(ui, "Generelt");
                 egui::Grid::new("innst_generelt").min_col_width(190.0).show(ui, |ui| {
                     ui.label("Sekunder mellom kursoppdateringer")
@@ -2815,8 +2819,29 @@ impl App {
                     ui.label("Daytrader på (krever omstart)");
                     ui.checkbox(&mut ap.enabled, "");
                     ui.end_row();
-                    ui.label("Symbol (kun dette ene)");
-                    ui.text_edit_singleline(&mut ap.symbol);
+                    ui.label("Symboler (komma-separert)")
+                        .on_hover_text("Ett eller flere symboler daytraderen handler, f.eks. «BTC-USD, EQNR.OL, NVDA». Budsjett og kvoter deles. Aksjer handles kun i åpningstid. Flere symboler = flere AI-kall — bruk ollama/duo.");
+                    {
+                        let buf = daytrader_buf.get_or_insert_with(|| {
+                            if ap.symbols.is_empty() {
+                                ap.symbol.clone()
+                            } else {
+                                ap.symbols.join(", ")
+                            }
+                        });
+                        ui.text_edit_singleline(buf);
+                        // Speil bufferen inn i konfigen: én = enkelt-symbol,
+                        // flere = liste (første beholdes også som symbol).
+                        let liste: Vec<String> = buf
+                            .split(',')
+                            .map(|t| t.trim().to_string())
+                            .filter(|t| !t.is_empty())
+                            .collect();
+                        if let Some(first) = liste.first() {
+                            ap.symbol = first.clone();
+                        }
+                        ap.symbols = if liste.len() > 1 { liste } else { Vec::new() };
+                    }
                     ui.end_row();
                     ui.label("Hjerne");
                     let vis = match ap.provider.as_str() {
@@ -3460,7 +3485,7 @@ impl App {
                                 ui.label(
                                     RichText::new(format!(
                                         "{} · budsjett {} kr · hvert {}. min · maks {}/dag · hjerne: {hjerne}",
-                                        ap.symbol,
+                                        ap.active_symbols().join(", "),
                                         fmt_thousands(ap.budget_kr),
                                         ap.interval_min.max(5),
                                         ap.max_trades_per_day

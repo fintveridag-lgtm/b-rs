@@ -160,9 +160,14 @@ impl Default for MorganCfg {
 pub struct AutopilotCfg {
     #[serde(default)]
     pub enabled: bool,
-    /// Symbolet Morgan får handle (kun dette ene).
+    /// Symbolet Morgan får handle (bakoverkompatibelt enkelt-symbol).
     #[serde(default = "default_autopilot_symbol")]
     pub symbol: String,
+    /// Flere symboler samtidig (papir-eksperiment: Morgan vs. botene).
+    /// Tom liste = bruk `symbol` alene. Aksjer handles kun i åpningstid.
+    /// Budsjett, maks handler/dag og dagstap-brems deles på tvers.
+    #[serde(default)]
+    pub symbols: Vec<String>,
     /// Hard grense: samlet beholdning i symbolet får aldri overstige dette.
     #[serde(default = "default_autopilot_budget")]
     pub budget_kr: f64,
@@ -192,6 +197,7 @@ impl Default for AutopilotCfg {
         Self {
             enabled: false,
             symbol: default_autopilot_symbol(),
+            symbols: Vec::new(),
             budget_kr: default_autopilot_budget(),
             interval_min: default_autopilot_interval(),
             max_trades_per_day: default_autopilot_max_trades(),
@@ -199,6 +205,26 @@ impl Default for AutopilotCfg {
             max_day_loss_kr: default_autopilot_day_loss(),
             cooldown_min: default_autopilot_cooldown(),
         }
+    }
+}
+
+impl AutopilotCfg {
+    /// Symbolene daytraderen faktisk handler: listen hvis satt, ellers
+    /// enkelt-symbolet. Tomme/dupliserte oppføringer lukes bort.
+    pub fn active_symbols(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let kilde: Vec<String> = if self.symbols.is_empty() {
+            vec![self.symbol.clone()]
+        } else {
+            self.symbols.clone()
+        };
+        for s in kilde {
+            let s = s.trim().to_string();
+            if !s.is_empty() && !out.contains(&s) {
+                out.push(s);
+            }
+        }
+        out
     }
 }
 
@@ -557,5 +583,20 @@ impl Config {
 
     pub fn is_live(&self) -> bool {
         self.mode == "live"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_symbols_falls_back_and_dedupes() {
+        let mut ap = AutopilotCfg::default();
+        // Tom liste → enkelt-symbolet.
+        assert_eq!(ap.active_symbols(), vec![ap.symbol.clone()]);
+        // Liste med rot: trimmes, tomme og duplikater lukes.
+        ap.symbols = vec![" BTC-USD ".into(), "EQNR.OL".into(), "".into(), "BTC-USD".into()];
+        assert_eq!(ap.active_symbols(), vec!["BTC-USD".to_string(), "EQNR.OL".to_string()]);
     }
 }
